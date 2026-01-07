@@ -93,6 +93,30 @@ func (c *Client) GetCurrentTick(ctx context.Context, symbol string) (*pricing.Ti
 	}, nil
 }
 
+// GetTickAfterTime retrieves the first tick at or after the specified time
+// AMENDMENT 2: Used to fetch entry tick (first tick after contract start_time)
+// Uses service-feed's GetTicks endpoint with count=1
+func (c *Client) GetTickAfterTime(ctx context.Context, symbol string, afterTime time.Time) (*pricing.Tick, error) {
+	resp, err := c.client.GetTicks(ctx, &feedapi.GetTicksRequest{
+		Symbol:    symbol,
+		StartTime: timestamppb.New(afterTime),
+		Count:     1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GetTicks failed for symbol %s: %w", symbol, err)
+	}
+	if len(resp.Ticks) == 0 {
+		return nil, fmt.Errorf("no tick available after time %s for symbol %s", afterTime, symbol)
+	}
+	
+	tick := resp.Ticks[0]
+	return &pricing.Tick{
+		Symbol:    tick.Symbol,
+		Price:     parseQuote(tick.Quote),
+		Timestamp: tick.Time.AsTime(),
+	}, nil
+}
+
 // Close closes the feed client connection
 func (c *Client) Close() error {
 	return c.conn.Close()

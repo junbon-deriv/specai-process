@@ -94,6 +94,20 @@ func (d *Duration) ToSeconds() (int64, error) {
 	return seconds, nil
 }
 
+// ToTicks converts a tick-based duration to number of ticks
+// Returns an error if the duration is time-based
+func (d *Duration) ToTicks() (int, error) {
+	if d.DurationType == DurationTypeTimeBased {
+		return 0, fmt.Errorf("cannot convert time-based duration to ticks")
+	}
+
+	if d.Unit != DurationUnitTicks {
+		return 0, fmt.Errorf("invalid tick-based duration unit: %s", d.Unit)
+	}
+
+	return d.Value, nil
+}
+
 // CalculateExpiryTime calculates the expiry time for a time-based duration
 // For tick-based durations, this returns an error as expiry is tick-count based
 func (d *Duration) CalculateExpiryTime(startTime time.Time) (time.Time, error) {

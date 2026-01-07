@@ -34,6 +34,17 @@ func (c *MockClient) GetCurrentTick(ctx context.Context, symbol string) (*pricin
 	}, nil
 }
 
+// GetTickAfterTime retrieves the first tick after the specified time (mock implementation)
+// AMENDMENT 2: Used to fetch entry tick in tests
+func (c *MockClient) GetTickAfterTime(ctx context.Context, symbol string, afterTime time.Time) (*pricing.Tick, error) {
+	// Mock implementation - return tick with timestamp after the specified time
+	return &pricing.Tick{
+		Symbol:    symbol,
+		Price:     1.08523,                        // Mock EUR/USD price
+		Timestamp: afterTime.Add(1 * time.Second), // 1 second after requested time
+	}, nil
+}
+
 // Subscribe creates a subscription to market ticks for a symbol (mock implementation)
 func (c *MockClient) Subscribe(ctx context.Context, symbol string) (<-chan *pricing.Tick, error) {
 	tickChan := make(chan *pricing.Tick, 10)

@@ -14,6 +14,7 @@ import (
 // FeedSubscriber defines the interface for market data feed (Rule 5.5: Interface at Consumer)
 type FeedSubscriber interface {
 	GetCurrentTick(ctx context.Context, symbol string) (*Tick, error)
+	GetTickAfterTime(ctx context.Context, symbol string, afterTime time.Time) (*Tick, error)
 	Subscribe(ctx context.Context, symbol string) (<-chan *Tick, error)
 	StreamWithFallback(ctx context.Context, symbol string, fallbackDuration time.Duration) (<-chan *Tick, error)
 }
@@ -131,6 +132,10 @@ type BidSubscription struct {
 	quotes chan *BidQuote
 	err    error
 	done   chan struct{}
+	// AMENDMENT 3: State for tick-based contracts
+	tickCount     int  // Number of ticks received after entry
+	requiredTicks int  // Required number of ticks for expiry
+	entryReceived bool // Whether entry tick has been received
 }
 
 // Quotes returns the read-only quote channel
@@ -315,10 +320,21 @@ func (c *Calculator) StreamBid(ctx context.Context, params *pb.OptionParameters)
 		return nil, err
 	}
 
-	// 3. Create subscription
+	// 3. Create subscription with tick counting state for tick-based contracts
 	sub := &BidSubscription{
-		quotes: make(chan *BidQuote, 10),
-		done:   make(chan struct{}),
+		quotes:        make(chan *BidQuote, 10),
+		done:          make(chan struct{}),
+		tickCount:     0,
+		requiredTicks: 0,
+		entryReceived: false,
+	}
+
+	// AMENDMENT 3: Initialize tick counting for tick-based durations
+	if !duration.IsTimeBased() {
+		sub.requiredTicks, err = duration.ToTicks()
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "Failed to parse tick duration: %v", err)
+		}
 	}
 
 	// 4. Subscribe to feed (with or without fallback)
@@ -379,8 +395,18 @@ func (c *Calculator) StreamBid(ctx context.Context, params *pb.OptionParameters)
 					return
 				}
 
-				// AMENDMENT 4: Pass the received tick to calculation (no GetCurrentTick)
-				quote, err := c.calculateBidQuote(ctx, optionParams, tick)
+				// AMENDMENT 3: Update tick count for tick-based contracts
+				if !duration.IsTimeBased() {
+					if !sub.entryReceived {
+						sub.entryReceived = true
+						sub.tickCount = 0 // Reset on entry tick
+					} else {
+						sub.tickCount++
+					}
+				}
+
+				// AMENDMENT 4: Pass the received tick and tick count to calculation
+				quote, err := c.calculateBidQuoteWithState(ctx, optionParams, tick, sub.tickCount, sub.requiredTicks)
 				if err != nil {
 					sub.err = err
 					return
@@ -453,24 +479,32 @@ func (c *Calculator) calculateAskQuote(ctx context.Context, params *OptionParams
 // - Accepts tick as parameter (no GetCurrentTick race condition)
 // - Uses provided payout instead of recalculating
 // - Uses tick timestamps for entry/exit spot time
-// - Prepares for tick-based duration logic (to be fully implemented with state)
+// - Simple version without tick counting (for CalculateBid unary call)
 func (c *Calculator) calculateBidQuote(ctx context.Context, params *OptionParams, tick *Tick) (*BidQuote, error) {
+	return c.calculateBidQuoteWithState(ctx, params, tick, 0, 0)
+}
+
+// calculateBidQuoteWithState performs bid calculation with tick counting state
+// tickCount: current number of ticks received (for tick-based contracts)
+// requiredTicks: required number of ticks for expiry (for tick-based contracts)
+func (c *Calculator) calculateBidQuoteWithState(ctx context.Context, params *OptionParams, tick *Tick, tickCount int, requiredTicks int) (*BidQuote, error) {
 	// AMENDMENT 1: Use provided payout instead of recalculating
 	if params.Payout == nil {
 		return nil, status.Error(codes.Internal, "payout is required for bid calculation")
 	}
 	payout := *params.Payout
 
-	// Determine entry spot
-	// TODO: In full implementation, fetch first tick after start_time and use its timestamp
-	// AMENDMENT 2: Entry spot time should be tick timestamp, not start_time
-	entrySpot := tick.Price         // Simplified - should be first tick after start
-	entrySpotTime := tick.Timestamp // AMENDMENT 2: Use tick timestamp, not start_time
+	// AMENDMENT 2: Fetch entry tick (first tick after start_time)
+	entryTick, err := c.feed.GetTickAfterTime(ctx, params.Symbol, *params.StartTime)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "Failed to get entry tick: %v", err)
+	}
+	entrySpot := entryTick.Price
+	entrySpotTime := entryTick.Timestamp // AMENDMENT 2: Use tick timestamp, not start_time
 
 	// Resolve barrier based on entry spot
 	barrier := entrySpot // Default
 	if params.Barrier != nil {
-		var err error
 		barrier, err = params.Barrier.ResolveBarrier(entrySpot)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "Failed to resolve barrier: %v", err)
@@ -483,7 +517,6 @@ func (c *Calculator) calculateBidQuote(ctx context.Context, params *OptionParams
 
 	if params.Duration.IsTimeBased() {
 		// AMENDMENT 3: Time-based duration - use time comparison
-		var err error
 		expiryTime, err = params.Duration.CalculateExpiryTime(*params.StartTime)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "Failed to calculate expiry: %v", err)
@@ -491,13 +524,9 @@ func (c *Calculator) calculateBidQuote(ctx context.Context, params *OptionParams
 		now := time.Now()
 		isExpired = now.After(expiryTime) || now.Equal(expiryTime)
 	} else {
-		// AMENDMENT 3: Tick-based duration - NO time-based expiry
-		// TODO: Implement tick counting state
-		// For now, set far future time and mark as not expired
-		// Full implementation requires maintaining tick counter
-		expiryTime = time.Now().Add(365 * 24 * time.Hour)
-		isExpired = false
-		// TODO: Track tick count: if (tickCount >= requiredTicks) { isExpired = true }
+		// AMENDMENT 3: Tick-based duration - use tick counting
+		expiryTime = time.Now().Add(365 * 24 * time.Hour) // Far future for display
+		isExpired = tickCount >= requiredTicks
 	}
 
 	// Determine bid price

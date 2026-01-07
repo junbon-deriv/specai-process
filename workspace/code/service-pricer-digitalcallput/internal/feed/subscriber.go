@@ -51,6 +51,13 @@ func (s *Subscriber) GetCurrentTick(ctx context.Context, symbol string) (*pricin
 	return s.client.GetCurrentTick(ctx, symbol)
 }
 
+// GetTickAfterTime retrieves the first tick at or after the specified time
+// AMENDMENT 2: Used to fetch entry tick (first tick after contract start_time)
+func (s *Subscriber) GetTickAfterTime(ctx context.Context, symbol string, afterTime time.Time) (*pricing.Tick, error) {
+	// Delegate to client - no caching for historical ticks
+	return s.client.GetTickAfterTime(ctx, symbol, afterTime)
+}
+
 // Subscribe creates or returns an existing subscription for a symbol
 func (s *Subscriber) Subscribe(ctx context.Context, symbol string) (<-chan *pricing.Tick, error) {
 	s.mu.Lock()
