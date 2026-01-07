@@ -732,6 +732,165 @@ grpcsvc ──uses──▶ pricing.Calculator (implements grpcsvc.PricingCalcul
 feed.Subscriber ────────────────────────┘
 ```
 
+### 5.7 Tick Passing Rule
+
+> **RULE**: When a tick triggers a recalculation, that specific tick MUST be passed through the calculation pipeline. Do NOT fetch a new tick during calculation.
+
+**✅ CORRECT Pattern for Streaming**:
+```go
+// internal/pricing/calculator.go
+func (c *Calculator) StreamAsk(ctx context.Context, params *pb.OptionParameters) (*AskSubscription, error) {
+    // ...
+    go func() {
+        for {
+            select {
+            case tick, ok := <-tickChan:  // Receive the triggering tick
+                if !ok {
+                    return
+                }
+                
+                // Pass the tick to calculation - DO NOT fetch again
+                quote, err := c.calculateAskQuoteWithTick(ctx, optionParams, tick)
+                if err != nil {
+                    sub.err = err
+                    return
+                }
+                
+                sub.quotes <- quote
+            }
+        }
+    }()
+    return sub, nil
+}
+
+// calculateAskQuoteWithTick accepts the tick as a parameter
+func (c *Calculator) calculateAskQuoteWithTick(
+    ctx context.Context,
+    params *OptionParams,
+    tick *Tick,  // Use THIS tick, not a fresh fetch
+) (*AskQuote, error) {
+    // Use tick.Price and tick.Timestamp directly
+    // Do NOT call c.feed.GetCurrentTick()
+    
+    barrier := tick.Price
+    if params.Barrier != nil {
+        barrier, _ = params.Barrier.ResolveBarrier(tick.Price)
+    }
+    
+    probability := BlackScholesDigitalOption(
+        tick.Price,  // Use the passed tick
+        barrier,
+        timeToExpiry,
+        c.config.Volatility,
+        c.config.InterestRate,
+        c.config.QuantoDrift,
+        params.ContractType,
+    )
+    
+    return &AskQuote{
+        CurrentSpot:     tick.Price,      // Use the passed tick
+        CurrentSpotTime: tick.Timestamp,  // Use the passed tick
+        // ... rest of quote
+    }, nil
+}
+```
+
+**❌ INCORRECT Pattern**:
+```go
+// BAD: Discards the triggering tick
+case tick, ok := <-tickChan:
+    if !ok {
+        return
+    }
+    // WRONG: Fetches a different tick
+    quote, err := c.calculateAskQuote(ctx, optionParams)  // This calls GetCurrentTick inside
+
+func (c *Calculator) calculateAskQuote(ctx context.Context, params *OptionParams) (*AskQuote, error) {
+    // RACE CONDITION: Gets a potentially different tick
+    tick, err := c.feed.GetCurrentTick(ctx, params.Symbol)
+    // ...
+}
+```
+
+**Key Principle**: Each stream update must be deterministic - the same input tick must always produce the same output quote.
+
+### 5.8 Tick-Based Expiry Rule
+
+> **RULE**: Tick-based duration contracts MUST track tick count and MUST NOT use time-based expiry checks.
+
+**✅ CORRECT Pattern**:
+```go
+// internal/pricing/calculator.go
+type BidQuoteCalculator struct {
+    // For tick-based contracts only
+    tickCounter     int
+    requiredTicks   int
+    entryTickSeen   bool
+}
+
+func (c *Calculator) calculateBidQuote(ctx context.Context, params *OptionParams, tick *Tick) (*BidQuote, error) {
+    if params.Duration.Unit == UnitTick {
+        // Tick-based: use tick counting
+        if !c.state.entryTickSeen {
+            c.state.entryTickSeen = true
+            c.state.tickCounter = 0
+        } else {
+            c.state.tickCounter++
+        }
+        
+        isExpired := c.state.tickCounter >= params.Duration.Value
+        
+        // NO time-based checks for tick contracts
+        
+    } else {
+        // Time-based: use time comparison
+        expiryTime := params.StartTime.Add(params.Duration.ToSeconds() * time.Second)
+        isExpired := time.Now().After(expiryTime)
+    }
+    
+    // ...
+}
+```
+
+**❌ INCORRECT Pattern**:
+```go
+// BAD: Uses far-future time as workaround
+if params.Duration.Unit == UnitTick {
+    expiryTime = time.Now().Add(365 * 24 * time.Hour)  // WRONG
+}
+
+// Later...
+isExpired := time.Now().After(expiryTime)  // WRONG for tick contracts
+```
+
+**Key Principle**: Tick-based and time-based durations require separate expiry logic. Do not try to unify them with workarounds.
+
+### 5.9 Entry/Exit Timestamp Rule
+
+> **RULE**: Entry spot time and exit spot time MUST be the tick timestamp from the market feed, NOT calculated times.
+
+**✅ CORRECT**:
+```go
+// When entry tick arrives
+entrySpot = tick.Price
+entrySpotTime = tick.Timestamp  // Use tick's timestamp, not start_time
+
+// When exit tick arrives
+exitSpot = tick.Price
+exitSpotTime = tick.Timestamp   // Use tick's timestamp, not expiry_time
+```
+
+**❌ INCORRECT**:
+```go
+entrySpot = tick.Price
+entrySpotTime = params.StartTime  // WRONG: using contract start time, not tick time
+
+exitSpot = tick.Price
+exitSpotTime = expiryTime  // WRONG: using calculated expiry time, not tick time
+```
+
+**Key Principle**: Spot times must always be actual market data timestamps, never calculated or derived times.
+
 ---
 
 ## 6. Data Strategy
@@ -800,40 +959,114 @@ Not applicable - stateless service with no persistent data.
 | Proto | proto/grpcfeed/v1/ticks.proto |
 | Client | client/client.go |
 
-### 6.2 Client Implementation
+### 6.2 service-feed API Contract
 
-```go
-// internal/feed/client.go
-import (
-    feedclient "github.com/junbon-deriv/service-feed/client"
-    feedpb "github.com/junbon-deriv/service-feed/proto/grpcfeed/v1"
-)
+**CRITICAL**: The following endpoints MUST be available in service-feed:
 
-type FeedClient struct {
-    client *feedclient.Client
+#### 6.2.1 GetTick (Unary RPC)
+```protobuf
+rpc GetTick(GetTickRequest) returns (Tick);
+
+message GetTickRequest {
+  string symbol = 1;
+  optional int64 time = 2;  // Optional: get tick at specific time
 }
 
-func NewFeedClient(addr string) (*FeedClient, error) {
-    client, err := feedclient.New(addr)
-    if err != nil {
-        return nil, fmt.Errorf("failed to connect to service-feed: %w", err)
-    }
-    return &FeedClient{client: client}, nil
-}
-
-func (f *FeedClient) Subscribe(ctx context.Context, symbol string) (<-chan *feedpb.Tick, error) {
-    return f.client.Subscribe(ctx, symbol)
+message Tick {
+  string symbol = 1;
+  string quote = 2;      // Price as string
+  google.protobuf.Timestamp time = 3;
 }
 ```
 
-### 6.3 Error Handling
+**Purpose**: Retrieve a single current or historical tick efficiently.
+
+**Usage in digitalcallput**:
+- Initial price fetch for GetAsk/GetBid
+- Fallback tick retrieval when stream has gaps (time-based durations only)
+- DO NOT use for stream repricing (use tick from stream)
+
+#### 6.2.2 StreamTicks (Server Streaming RPC)
+```protobuf
+rpc StreamTicks(StreamTicksRequest) returns (stream TickBatch);
+
+message StreamTicksRequest {
+  string symbol = 1;
+  google.protobuf.Timestamp start_time = 2;
+}
+
+message TickBatch {
+  repeated Tick ticks = 1;
+}
+```
+
+**Purpose**: Continuous stream of ticks for a symbol.
+
+**Usage in digitalcallput**:
+- StreamAsk price updates
+- StreamBid price updates
+- Tick counting for tick-based durations
+
+### 6.3 Client Implementation Requirements
+
+```go
+// internal/feed/client.go
+
+// GetTick fetches a single current tick (uses GetTick endpoint)
+func (c *Client) GetTick(ctx context.Context, symbol string) (*pricing.Tick, error) {
+    // MUST use GetTick endpoint, NOT StreamTicks
+    resp, err := c.client.GetTick(ctx, &feedapi.GetTickRequest{
+        Symbol: symbol,
+    })
+    if err != nil {
+        return nil, err
+    }
+    return &pricing.Tick{
+        Symbol:    resp.Symbol,
+        Price:     parseQuote(resp.Quote),
+        Timestamp: resp.Time.AsTime(),
+    }, nil
+}
+
+// Subscribe creates a continuous stream (uses StreamTicks endpoint)
+func (c *Client) Subscribe(ctx context.Context, symbol string) (<-chan *pricing.Tick, error) {
+    // Correct usage of StreamTicks for streaming
+    stream, err := c.client.StreamTicks(ctx, &feedapi.StreamTicksRequest{
+        Symbol:    symbol,
+        StartTime: timestamppb.Now(),
+    })
+    // ... handle stream
+}
+```
+
+**WRONG Implementation** (current code):
+```go
+// DO NOT use StreamTicks for single tick retrieval
+func (c *Client) GetCurrentTick(ctx context.Context, symbol string) (*pricing.Tick, error) {
+    stream, err := c.client.StreamTicks(ctx, ...) // WRONG ENDPOINT
+    resp, err := stream.Recv()
+    // Creates stream just to read one message - inefficient
+}
+```
+
+### 6.4 Error Handling
 
 | Scenario | Action |
 |----------|--------|
-| Connection failure | Retry with exponential backoff |
-| Subscription failure | Return UNAVAILABLE to client |
-| Tick timeout | 5-second fallback (time-based only) |
-| Stream disconnect | Reconnect and resume |
+| GetTick failure | Return UNAVAILABLE to client |
+| StreamTicks connection failure | Retry with exponential backoff |
+| StreamTicks stream disconnect | Reconnect and resume from last tick time |
+| Tick timeout (time-based) | Use 5-second fallback: call GetTick |
+| Tick timeout (tick-based) | NO fallback: wait for next tick indefinitely |
+
+### 6.5 Integration Testing Requirements
+
+**Before deployment, verify**:
+1. service-feed has GetTick endpoint (not just StreamTicks)
+2. GetTick returns single tick efficiently
+3. StreamTicks maintains connection for long durations
+4. Tick timestamps are monotonically increasing
+5. Reconnection logic works correctly
 
 ---
 

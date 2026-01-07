@@ -18,6 +18,22 @@ Client loses the stake if contract expire worthless. Client should be able to re
     **Start Time**: The start time of the contract. Only required for bid request.
 *Pricing time*: Pricing request epoch time. Optional parameter.
 
+### 1.1 Contract Lifecycle and Payout Determination
+
+**CRITICAL**: The payout amount is calculated and fixed at the time of contract purchase (Ask request). Once a contract is purchased, the payout becomes a contractual obligation and MUST NOT be recalculated during the contract's lifetime.
+
+**For Bid Requests**:
+- The payout value MUST be included in the request parameters
+- The payout value should be the same value that was returned in the original Ask response at purchase time
+- Bid price calculation uses: `bid_price = payout × current_probability`
+- The payout parameter ensures consistency and prevents recalculation errors
+
+**Why This Matters**:
+- Contract terms are legally binding at purchase time
+- Market conditions (volatility, commission rates) may change after purchase
+- Recalculating payout would violate contractual obligations
+- Financial audits require consistency between purchase and valuation
+
 ### 2. Ask Response
 *   **Current Spot**: Spot price of the underlying asset.
 *   **Current Spot Time**: Time associated with the spot price.
@@ -27,18 +43,20 @@ Client loses the stake if contract expire worthless. Client should be able to re
 *   **Limits**: Contains option specific trading limits.
 
 ### 3. Bid Response
-*   **Currrent Spot**: Spot price of the underlying asset.
-*   **Current Spot Time**: Time associated with the spot price.
-*   **Entry Spot**: Entry price of the contract.
-*   **Entry Spot Time**: Time associated with the entry price.
-*   **Exit Spot**: Exit price of the contract.
-*   **Exit Spot Time**: Time associated with the exit price.
-*   **Bid Price**: Bid price.
+*   **Current Spot**: Spot price of the underlying asset at pricing time.
+*   **Current Spot Time**: Time associated with the current spot price at pricing time.
+*   **Entry Spot**: Entry price of the contract (first tick price after start time).
+*   **Entry Spot Time**: **CRITICAL** - Timestamp of the entry tick, NOT the contract start time. This is the timestamp from the market feed when the entry spot was recorded. Must match the actual time the entry price was observed in the market.
+*   **Exit Spot**: Exit price of the contract (for expired contracts only).
+*   **Exit Spot Time**: **CRITICAL** - Timestamp of the exit tick, NOT the expiry time. This is the timestamp from the market feed when the exit spot was recorded.
+*   **Bid Price**: Current market value of the contract.
 *   **Currency**: The contract quoted currency.
-*   **Barrier**: Contract barrier.
-*   **Start Time**: Contract start time.
-*   **Expiry Time**: Contract end time.
+*   **Barrier**: Contract barrier (resolved value, not the input specification).
+*   **Start Time**: Contract start time (when contract was purchased).
+*   **Expiry Time**: Contract end time (calculated from start time + duration for time-based contracts).
 *   **Is Expired**: Boolean to indicate if contract is expired.
+
+**Implementation Note**: Entry Spot Time and Exit Spot Time are market data timestamps, not calculated times. They must be preserved from the actual ticks received from the market feed.
 
 ### 4. Limits
 *   **Max Payout**: Maximum payout per contract.
@@ -55,12 +73,35 @@ Client loses the stake if contract expire worthless. Client should be able to re
 
 ### 6. Lifecycle & State Machine (The "Bid" / Active Contract)
 *What happens after purchase?*
-*   **Start Condition**: The contract starts once it receives an entry price.
-*   **Update Frequency**: Contract price should be updated when it receives a new tick or 5 seconds after the previous price update. Update stops after contract expires.
+
+#### Contract Start
+*   **Start Condition**: The contract starts at the specified start_time and begins waiting for the entry tick.
+*   **Entry Determination**: The contract receives its entry price from the first tick AFTER the start_time.
+
+#### Duration Types and Expiry Logic
+
+**Time-Based Durations (s, m, h, d)**:
+*   **Update Frequency**: Contract price should be updated when it receives a new tick OR every 5 seconds (whichever comes first).
+*   **Expiry Condition**: The contract expires at `start_time + duration`. Use time comparison: `now >= expiry_time`.
+*   **Update Stops**: After contract expires (time-based check).
+
+**Tick-Based Durations (t)**:
+*   **Update Frequency**: Contract price should be updated ONLY when a new tick is received. NO time-based fallback.
+*   **Expiry Condition**: The contract expires when exactly N ticks have been received after the entry tick. Track tick count internally.
+*   **NO Time-Based Expiry**: Do NOT use time comparisons for tick-based contracts. The contract remains active until the tick count is reached, regardless of elapsed time.
+*   **Implementation Requirement**: Maintain a tick counter that increments on each received tick after entry. When counter reaches N, mark contract as expired.
+
+**CRITICAL DISTINCTION**: Time-based and tick-based contracts have fundamentally different expiry mechanisms. Implementation must use separate code paths:
+- Time-based: `if (now >= expiryTime) { expired = true }`
+- Tick-based: `if (tickCount >= requiredTicks) { expired = true }`
+
+#### Win/Loss Conditions
 *   **Winning Condition**: For a Call option, client wins when the exit price is strictly higher than the barrier. For a Put option, client wins when the exit price is strictly lower than the barrier.
-*   **Losing Condition**: For a Call option, client loses when the exit prcie is lower or equal than the barrier. For a Put option, client loses when the exit price is lower or equal than the barrier.
-*   **Expiry Condition**: The contract expires at the expiry time.
-*   **Early Exit**: The contract can be sold at market. Contract value can be calculated using the same pricing logic.
+*   **Losing Condition**: For a Call option, client loses when the exit price is lower or equal to the barrier. For a Put option, client loses when the exit price is higher or equal to the barrier.
+
+#### Early Exit (Time-Based Contracts Only)
+*   **Time-Based Contracts**: The contract can be sold at market value before expiry. Bid price is calculated using Black-Scholes with remaining time to expiry.
+*   **Tick-Based Contracts**: NO early exit supported. Contract must complete all required ticks. Bid price calculation for active tick-based contracts should use tick-counting logic, not time-based Black-Scholes.
 
 ---
 
@@ -109,6 +150,7 @@ message OptionParameters {
   optional string barrier = 5; // Relative (+/-) or absolute. Optional.
   optional int64 start_time = 6; // Required for active contract
   string stake = 7; // Premium paid. Required.
+  optional string payout = 8; // REQUIRED for bid requests: Fixed payout from purchase time
 }
 
 message GetAskRequest {

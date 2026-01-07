@@ -239,8 +239,14 @@ The Digital Call/Put Options Pricing Service is a stateless gRPC microservice th
 
 **Request Parameters**:
 - `option_parameters` (required):
-  - All fields from GetAsk
+  - `symbol` (string, required): Underlying asset
+  - `contract_type` (enum, required): CALL or PUT
+  - `currency` (string, required): Payout currency
+  - `stake` (string, required): Premium amount (decimal string)
+  - `duration` (string, required): Contract duration
+  - `barrier` (string, optional): Relative or absolute
   - `start_time` (int64, required): Contract start timestamp
+  - **`payout` (string, required): Fixed payout from purchase time - MUST be provided, do NOT recalculate**
 
 **Response Fields**:
 - `bid_price` (string): Current market value of contract
@@ -257,25 +263,35 @@ The Digital Call/Put Options Pricing Service is a stateless gRPC microservice th
 - `currency` (string): Contract currency
 
 **Business Rules**:
-- Entry spot = First tick after start_time
-- **Expiry time calculation**:
-  - Time-based durations (s/m/h/d): start_time + duration
-  - Tick-based durations (t): After N ticks received (no time-based expiry)
-- Exit spot = First tick at or after expiry_time (for time-based) or Nth tick (for tick-based)
-- Bid price calculated using Black-Scholes with time remaining
+- `start_time` is required in `option_parameters`
+- **`payout` is required and must match the payout from the original Ask response**
+- Entry spot is first tick after start_time
+- **Entry spot time is the timestamp of that first tick (not start_time)**
+- Expiry calculation differs for time-based vs tick-based durations:
+  - **Time-based**: expiry_time = start_time + duration; check: `now >= expiry_time`
+  - **Tick-based**: Track tick count; check: `tick_count >= N`; NO time-based expiry
 - If expired:
   - Call wins if exit_spot > barrier
   - Put wins if exit_spot < barrier
   - Bid price = payout (if win) or 0 (if loss)
+- If active (Early Exit):
+  - **Time-based contracts**: Support early exit
+    - Calculate `remainingTime = expiry_time - now`
+    - Use Black-Scholes with remaining time to calculate current probability
+    - Bid price = payout × current_probability
+  - **Tick-based contracts**: NO early exit supported
+    - Contract must complete all required ticks
+    - Bid price calculation not applicable for early exit scenarios
 
 **Validation Rules**: Same as GetAsk, plus:
 - start_time must be provided
 - start_time must be in the past
+- **payout must be provided and must be positive**
 
 #### 4.1.4 StreamBid
 **Purpose**: Stream continuous bid price updates for active contract
 
-**Request Parameters**: Same as GetBid
+**Request Parameters**: Same as GetBid (including required `payout` parameter)
 
 **Response Stream**: Continuous stream of GetBidResponse messages
 
@@ -288,7 +304,7 @@ The Digital Call/Put Options Pricing Service is a stateless gRPC microservice th
   - Contract expires (automatic termination)
 - Final update includes expiry status and settlement
 
-**Business Rules**: Same as GetBid
+**Business Rules**: Same as GetBid (including payout parameter requirement)
 
 ### 4.2 Pricing Logic
 
@@ -573,6 +589,7 @@ message OptionParameters {
   optional string barrier = 5;    // Optional: "+50", "1.2345"
   optional int64 start_time = 6;  // Required for bid requests
   string stake = 7;               // Required: "100.00"
+  optional string payout = 8;     // Required for bid requests: "196.00"
 }
 ```
 
