@@ -6,7 +6,7 @@ This template is designed to guide a non-technical team in defining a new financ
 
 Digital Call/Put options is a binary option. For a Call option, client wins full payout if the symbol's exit price is strictly higher than the barrier. For a Put option, client wins full payout if the symbol's exit price is strictly lower than the barrier. Barrier can be defined by the client. The product accepts relative barrier, absolute barrier or null. If relative barrier is provided by the client, the barrier value can be calculated from the symbol's entry price of the contract. Entry price is the next price after contract start time. If barrier is not provided, the product uses the entry price as the barrier.
 
-Client loses the stake if contract expire worthless. Client should be able to request for a single contract price or request for a stream of contract prices. Similarly, client should be able to request for the contract value after the contract is purchase. Client can sell the contract at market value before the contract expiry time.
+Client loses the stake if contract expire worthless. Client should be able to request for a single contract price or request for a stream of contract prices. Similarly, client should be able to request for the contract value after the contract is purchased. Client can sell the contract at market value before the contract expiry time.
 
 ### 1. Contract Request Parameters for Get & Stream endpoints (Inputs)
 *Digital option parameters*
@@ -25,7 +25,6 @@ Client loses the stake if contract expire worthless. Client should be able to re
 **For Bid Requests**:
 - The payout value MUST be included in the request parameters
 - The payout value should be the same value that was returned in the original Ask response at purchase time
-- Bid price calculation uses: `bid_price = payout × current_probability`
 - The payout parameter ensures consistency and prevents recalculation errors
 
 **Why This Matters**:
@@ -107,14 +106,7 @@ Client loses the stake if contract expire worthless. Client should be able to re
 
 ## Part 2: Technical Implementation Guide (For AI Agent)
 
-*Use this section to generate the Go service code based on the definitions above.*
-
-### 1. Service Code Structure
-The service should follow standard go template. Steps to clone template
-*   cd /Users/junbon/Project
-*   check if go-templates command exists. Delete if exists.
-
-### 2. Proto Definition
+### 1. Proto Definition
 
 In service-pricer-digitalcallput repository, update protobuf with the following definitions.
 
