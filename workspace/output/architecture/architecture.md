@@ -961,30 +961,51 @@ Not applicable - stateless service with no persistent data.
 
 ### 6.2 service-feed API Contract
 
-**CRITICAL**: The following endpoints MUST be available in service-feed:
+**VERIFIED**: The following endpoints are available in service-feed (from `proto/grpcfeed/v1/ticks.proto`):
 
-#### 6.2.1 GetTick (Unary RPC)
+#### 6.2.1 GetLatestTick (Unary RPC) ✅
 ```protobuf
-rpc GetTick(GetTickRequest) returns (Tick);
+rpc GetLatestTick(GetLatestTickRequest) returns (GetLatestTickResponse);
 
-message GetTickRequest {
+message GetLatestTickRequest {
   string symbol = 1;
-  optional int64 time = 2;  // Optional: get tick at specific time
+}
+
+message GetLatestTickResponse {
+  Tick tick = 1;
 }
 
 message Tick {
   string symbol = 1;
-  string quote = 2;      // Price as string
-  google.protobuf.Timestamp time = 3;
+  google.protobuf.Timestamp time = 2;
+  string quote = 3;      // Price as string
 }
 ```
 
-**Purpose**: Retrieve a single current or historical tick efficiently.
+**Purpose**: Retrieve the latest known tick for a symbol efficiently.
 
 **Usage in digitalcallput**:
 - Initial price fetch for GetAsk/GetBid
 - Fallback tick retrieval when stream has gaps (time-based durations only)
 - DO NOT use for stream repricing (use tick from stream)
+
+#### 6.2.1b GetTicks (Unary RPC) ✅
+```protobuf
+rpc GetTicks(GetTicksRequest) returns (GetTicksResponse);
+
+message GetTicksRequest {
+  string symbol = 1;
+  google.protobuf.Timestamp start_time = 2;
+  google.protobuf.Timestamp end_time = 3;
+  int64 count = 4;
+}
+```
+
+**Purpose**: Retrieve historical ticks for a time range.
+
+**Usage in digitalcallput**:
+- Entry spot determination (first tick after start_time)
+- Historical price lookups
 
 #### 6.2.2 StreamTicks (Server Streaming RPC)
 ```protobuf
@@ -1012,19 +1033,22 @@ message TickBatch {
 ```go
 // internal/feed/client.go
 
-// GetTick fetches a single current tick (uses GetTick endpoint)
-func (c *Client) GetTick(ctx context.Context, symbol string) (*pricing.Tick, error) {
-    // MUST use GetTick endpoint, NOT StreamTicks
-    resp, err := c.client.GetTick(ctx, &feedapi.GetTickRequest{
+// ✅ CORRECT: GetCurrentTick uses GetLatestTick endpoint
+func (c *Client) GetCurrentTick(ctx context.Context, symbol string) (*pricing.Tick, error) {
+    resp, err := c.client.GetLatestTick(ctx, &feedapi.GetLatestTickRequest{
         Symbol: symbol,
     })
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("GetLatestTick failed for symbol %s: %w", symbol, err)
     }
+    if resp.Tick == nil {
+        return nil, fmt.Errorf("no tick available for symbol %s", symbol)
+    }
+    
     return &pricing.Tick{
-        Symbol:    resp.Symbol,
-        Price:     parseQuote(resp.Quote),
-        Timestamp: resp.Time.AsTime(),
+        Symbol:    resp.Tick.Symbol,
+        Price:     parseQuote(resp.Tick.Quote),
+        Timestamp: resp.Tick.Time.AsTime(),
     }, nil
 }
 
@@ -1033,13 +1057,13 @@ func (c *Client) Subscribe(ctx context.Context, symbol string) (<-chan *pricing.
     // Correct usage of StreamTicks for streaming
     stream, err := c.client.StreamTicks(ctx, &feedapi.StreamTicksRequest{
         Symbol:    symbol,
-        StartTime: timestamppb.Now(),
+        Time:      timestamppb.Now(),
     })
     // ... handle stream
 }
 ```
 
-**WRONG Implementation** (current code):
+**❌ WRONG Implementation** (previous code):
 ```go
 // DO NOT use StreamTicks for single tick retrieval
 func (c *Client) GetCurrentTick(ctx context.Context, symbol string) (*pricing.Tick, error) {
@@ -1053,17 +1077,17 @@ func (c *Client) GetCurrentTick(ctx context.Context, symbol string) (*pricing.Ti
 
 | Scenario | Action |
 |----------|--------|
-| GetTick failure | Return UNAVAILABLE to client |
+| GetLatestTick failure | Return UNAVAILABLE to client |
 | StreamTicks connection failure | Retry with exponential backoff |
 | StreamTicks stream disconnect | Reconnect and resume from last tick time |
-| Tick timeout (time-based) | Use 5-second fallback: call GetTick |
+| Tick timeout (time-based) | Use 5-second fallback: call GetLatestTick |
 | Tick timeout (tick-based) | NO fallback: wait for next tick indefinitely |
 
 ### 6.5 Integration Testing Requirements
 
 **Before deployment, verify**:
-1. service-feed has GetTick endpoint (not just StreamTicks)
-2. GetTick returns single tick efficiently
+1. ✅ service-feed has GetLatestTick endpoint (verified in ticks.proto)
+2. GetLatestTick returns single tick efficiently
 3. StreamTicks maintains connection for long durations
 4. Tick timestamps are monotonically increasing
 5. Reconnection logic works correctly

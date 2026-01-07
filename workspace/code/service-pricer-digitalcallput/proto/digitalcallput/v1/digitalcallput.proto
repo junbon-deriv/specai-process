@@ -51,6 +51,11 @@ message OptionParameters {
   
   // Stake is the premium amount (decimal string)
   string stake = 7;
+  
+  // Payout is the fixed payout amount from purchase time (required for bid requests only)
+  // This is the payout value returned from the original Ask response
+  // MUST NOT be recalculated during bid price calculation
+  optional string payout = 8;
 }
 
 // Limits contains trading constraints

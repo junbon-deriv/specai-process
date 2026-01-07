@@ -34,6 +34,7 @@ type OptionParams struct {
 	Duration     Duration
 	Barrier      *Barrier
 	StartTime    *time.Time
+	Payout       *float64 // Required for bid requests: fixed payout from purchase time
 }
 
 // AskQuote represents the result of ask price calculation
@@ -196,49 +197,13 @@ func (c *Calculator) CalculateAsk(ctx context.Context, params *pb.OptionParamete
 		return nil, status.Errorf(codes.Unavailable, "Market data feed unavailable: %v", err)
 	}
 
-	// 3. Calculate time to expiry
-	timeToExpiry, err := c.calculateTimeToExpiry(optionParams.Duration, time.Now())
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to calculate expiry: %v", err)
-	}
-
-	// 4. Resolve barrier
-	barrier := tick.Price // Default to entry spot
-	if optionParams.Barrier != nil {
-		barrier, err = optionParams.Barrier.ResolveBarrier(tick.Price)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "Failed to resolve barrier: %v", err)
-		}
-	}
-
-	// 5. Calculate probability using Black-Scholes
-	probability := BlackScholesDigitalOption(
-		tick.Price,
-		barrier,
-		timeToExpiry,
-		c.config.Volatility,
-		c.config.InterestRate,
-		c.config.QuantoDrift,
-		optionParams.ContractType,
-	)
-
-	// 6. Calculate payout
-	payout := CalculateAskPayout(optionParams.Stake, probability, c.config.Commission)
-
-	// 7. Build and return quote
-	return &AskQuote{
-		AskPrice:        optionParams.Stake, // Ask price equals stake
-		Currency:        optionParams.Currency,
-		CurrentSpot:     tick.Price,
-		CurrentSpotTime: tick.Timestamp,
-		Payout:          payout,
-		Limits:          c.limits,
-	}, nil
+	// 3. AMENDMENT 4: Pass tick to calculation function
+	return c.calculateAskQuote(ctx, optionParams, tick)
 }
 
 // CalculateBid calculates the bid price for an active contract
 func (c *Calculator) CalculateBid(ctx context.Context, params *pb.OptionParameters) (*BidQuote, error) {
-	// 1. Validate and parse parameters (bid requires start_time)
+	// 1. Validate and parse parameters (bid requires start_time and payout)
 	optionParams, err := c.parseAndValidateParams(params, true)
 	if err != nil {
 		return nil, err
@@ -250,94 +215,8 @@ func (c *Calculator) CalculateBid(ctx context.Context, params *pb.OptionParamete
 		return nil, status.Errorf(codes.Unavailable, "Market data feed unavailable: %v", err)
 	}
 
-	// 3. Determine entry spot (for now, use start time price)
-	// In a real implementation, this would fetch the first tick after start_time
-	entrySpot := tick.Price // Simplified for initial implementation
-	entrySpotTime := *optionParams.StartTime
-
-	// 4. Resolve barrier based on entry spot
-	barrier := entrySpot // Default
-	if optionParams.Barrier != nil {
-		barrier, err = optionParams.Barrier.ResolveBarrier(entrySpot)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "Failed to resolve barrier: %v", err)
-		}
-	}
-
-	// 5. Calculate expiry time
-	var expiryTime time.Time
-	if optionParams.Duration.IsTimeBased() {
-		expiryTime, err = optionParams.Duration.CalculateExpiryTime(*optionParams.StartTime)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "Failed to calculate expiry: %v", err)
-		}
-	} else {
-		// Tick-based: expiry is not time-based
-		// For now, set a far future time
-		expiryTime = time.Now().Add(365 * 24 * time.Hour)
-	}
-
-	// 6. Check if contract has expired
-	now := time.Now()
-	isExpired := now.After(expiryTime) || now.Equal(expiryTime)
-
-	// 7. Calculate payout (same formula as ask)
-	timeToExpiry := expiryTime.Sub(*optionParams.StartTime).Seconds() / (365.25 * 24 * 60 * 60)
-	probability := BlackScholesDigitalOption(
-		entrySpot,
-		barrier,
-		timeToExpiry,
-		c.config.Volatility,
-		c.config.InterestRate,
-		c.config.QuantoDrift,
-		optionParams.ContractType,
-	)
-	payout := CalculateAskPayout(optionParams.Stake, probability, c.config.Commission)
-
-	// 8. Determine bid price
-	var bidPrice float64
-	var exitSpot *float64
-	var exitSpotTime *time.Time
-
-	if isExpired {
-		// Contract expired - check win condition
-		exitSpotVal := tick.Price
-		exitSpot = &exitSpotVal
-		exitSpotTimeVal := tick.Timestamp
-		exitSpotTime = &exitSpotTimeVal
-
-		hasWon := c.checkWinCondition(tick.Price, barrier, optionParams.ContractType)
-		bidPrice = CalculateBidPrice(payout, probability, true, hasWon)
-	} else {
-		// Contract active - calculate current value
-		remainingTime := expiryTime.Sub(now).Seconds() / (365.25 * 24 * 60 * 60)
-		currentProbability := BlackScholesDigitalOption(
-			tick.Price,
-			barrier,
-			remainingTime,
-			c.config.Volatility,
-			c.config.InterestRate,
-			c.config.QuantoDrift,
-			optionParams.ContractType,
-		)
-		bidPrice = CalculateBidPrice(payout, currentProbability, false, false)
-	}
-
-	// 9. Build and return quote
-	return &BidQuote{
-		BidPrice:        bidPrice,
-		IsExpired:       isExpired,
-		CurrentSpot:     tick.Price,
-		CurrentSpotTime: tick.Timestamp,
-		EntrySpot:       entrySpot,
-		EntrySpotTime:   entrySpotTime,
-		ExitSpot:        exitSpot,
-		ExitSpotTime:    exitSpotTime,
-		Barrier:         barrier,
-		StartTime:       *optionParams.StartTime,
-		ExpiryTime:      expiryTime,
-		Currency:        optionParams.Currency,
-	}, nil
+	// 3. AMENDMENT 4: Pass tick to calculation function
+	return c.calculateBidQuote(ctx, optionParams, tick)
 }
 
 // StreamAsk creates a subscription that streams ask price updates
@@ -364,8 +243,13 @@ func (c *Calculator) StreamAsk(ctx context.Context, params *pb.OptionParameters)
 	go func() {
 		defer close(sub.quotes)
 
-		// Send initial quote immediately
-		quote, err := c.calculateAskQuote(ctx, optionParams)
+		// Send initial quote immediately (fetch initial tick)
+		initialTick, err := c.feed.GetCurrentTick(ctx, optionParams.Symbol)
+		if err != nil {
+			sub.err = err
+			return
+		}
+		quote, err := c.calculateAskQuote(ctx, optionParams, initialTick)
 		if err != nil {
 			sub.err = err
 			return
@@ -380,7 +264,7 @@ func (c *Calculator) StreamAsk(ctx context.Context, params *pb.OptionParameters)
 			return
 		}
 
-		// Stream updates on each tick
+		// AMENDMENT 4: Stream updates on each tick - pass tick through pipeline
 		for {
 			select {
 			case <-ctx.Done():
@@ -390,13 +274,13 @@ func (c *Calculator) StreamAsk(ctx context.Context, params *pb.OptionParameters)
 			case <-sub.done:
 				return
 
-			case _, ok := <-tickChan:
+			case tick, ok := <-tickChan:
 				if !ok {
 					return
 				}
 
-				// Recalculate with new market data
-				quote, err := c.calculateAskQuote(ctx, optionParams)
+				// AMENDMENT 4: Pass the received tick to calculation (no GetCurrentTick)
+				quote, err := c.calculateAskQuote(ctx, optionParams, tick)
 				if err != nil {
 					sub.err = err
 					return
@@ -454,8 +338,13 @@ func (c *Calculator) StreamBid(ctx context.Context, params *pb.OptionParameters)
 	go func() {
 		defer close(sub.quotes)
 
-		// Send initial quote immediately
-		quote, err := c.calculateBidQuote(ctx, optionParams)
+		// Send initial quote immediately (fetch initial tick)
+		initialTick, err := c.feed.GetCurrentTick(ctx, optionParams.Symbol)
+		if err != nil {
+			sub.err = err
+			return
+		}
+		quote, err := c.calculateBidQuote(ctx, optionParams, initialTick)
 		if err != nil {
 			sub.err = err
 			return
@@ -475,7 +364,7 @@ func (c *Calculator) StreamBid(ctx context.Context, params *pb.OptionParameters)
 			return
 		}
 
-		// Stream updates on each tick until expiry
+		// AMENDMENT 4: Stream updates on each tick - pass tick through pipeline
 		for {
 			select {
 			case <-ctx.Done():
@@ -485,13 +374,13 @@ func (c *Calculator) StreamBid(ctx context.Context, params *pb.OptionParameters)
 			case <-sub.done:
 				return
 
-			case _, ok := <-tickChan:
+			case tick, ok := <-tickChan:
 				if !ok {
 					return
 				}
 
-				// Recalculate with new market data
-				quote, err := c.calculateBidQuote(ctx, optionParams)
+				// AMENDMENT 4: Pass the received tick to calculation (no GetCurrentTick)
+				quote, err := c.calculateBidQuote(ctx, optionParams, tick)
 				if err != nil {
 					sub.err = err
 					return
@@ -517,14 +406,9 @@ func (c *Calculator) StreamBid(ctx context.Context, params *pb.OptionParameters)
 	return sub, nil
 }
 
-// calculateAskQuote performs ask calculation using internal OptionParams
-func (c *Calculator) calculateAskQuote(ctx context.Context, params *OptionParams) (*AskQuote, error) {
-	// Get current market tick
-	tick, err := c.feed.GetCurrentTick(ctx, params.Symbol)
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "Market data feed unavailable: %v", err)
-	}
-
+// AMENDMENT 4: calculateAskQuote now accepts tick as parameter to avoid race conditions
+// The tick that triggers repricing must be passed through the calculation pipeline
+func (c *Calculator) calculateAskQuote(ctx context.Context, params *OptionParams, tick *Tick) (*AskQuote, error) {
 	// Calculate time to expiry
 	timeToExpiry, err := c.calculateTimeToExpiry(params.Duration, time.Now())
 	if err != nil {
@@ -565,57 +449,56 @@ func (c *Calculator) calculateAskQuote(ctx context.Context, params *OptionParams
 	}, nil
 }
 
-// calculateBidQuote performs bid calculation using internal OptionParams
-func (c *Calculator) calculateBidQuote(ctx context.Context, params *OptionParams) (*BidQuote, error) {
-	// Get current market tick
-	tick, err := c.feed.GetCurrentTick(ctx, params.Symbol)
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "Market data feed unavailable: %v", err)
+// AMENDMENT 1, 2, 3, 4: calculateBidQuote with all fixes
+// - Accepts tick as parameter (no GetCurrentTick race condition)
+// - Uses provided payout instead of recalculating
+// - Uses tick timestamps for entry/exit spot time
+// - Prepares for tick-based duration logic (to be fully implemented with state)
+func (c *Calculator) calculateBidQuote(ctx context.Context, params *OptionParams, tick *Tick) (*BidQuote, error) {
+	// AMENDMENT 1: Use provided payout instead of recalculating
+	if params.Payout == nil {
+		return nil, status.Error(codes.Internal, "payout is required for bid calculation")
 	}
+	payout := *params.Payout
 
-	// Determine entry spot (for now, use start time price)
-	// In a real implementation, this would fetch the first tick after start_time
-	entrySpot := tick.Price // Simplified for initial implementation
-	entrySpotTime := *params.StartTime
+	// Determine entry spot
+	// TODO: In full implementation, fetch first tick after start_time and use its timestamp
+	// AMENDMENT 2: Entry spot time should be tick timestamp, not start_time
+	entrySpot := tick.Price         // Simplified - should be first tick after start
+	entrySpotTime := tick.Timestamp // AMENDMENT 2: Use tick timestamp, not start_time
 
 	// Resolve barrier based on entry spot
 	barrier := entrySpot // Default
 	if params.Barrier != nil {
+		var err error
 		barrier, err = params.Barrier.ResolveBarrier(entrySpot)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "Failed to resolve barrier: %v", err)
 		}
 	}
 
-	// Calculate expiry time
+	// Calculate expiry time and check expiry
 	var expiryTime time.Time
+	var isExpired bool
+
 	if params.Duration.IsTimeBased() {
+		// AMENDMENT 3: Time-based duration - use time comparison
+		var err error
 		expiryTime, err = params.Duration.CalculateExpiryTime(*params.StartTime)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "Failed to calculate expiry: %v", err)
 		}
+		now := time.Now()
+		isExpired = now.After(expiryTime) || now.Equal(expiryTime)
 	} else {
-		// Tick-based: expiry is not time-based
-		// For now, set a far future time
+		// AMENDMENT 3: Tick-based duration - NO time-based expiry
+		// TODO: Implement tick counting state
+		// For now, set far future time and mark as not expired
+		// Full implementation requires maintaining tick counter
 		expiryTime = time.Now().Add(365 * 24 * time.Hour)
+		isExpired = false
+		// TODO: Track tick count: if (tickCount >= requiredTicks) { isExpired = true }
 	}
-
-	// Check if contract has expired
-	now := time.Now()
-	isExpired := now.After(expiryTime) || now.Equal(expiryTime)
-
-	// Calculate payout (same formula as ask)
-	timeToExpiry := expiryTime.Sub(*params.StartTime).Seconds() / (365.25 * 24 * 60 * 60)
-	probability := BlackScholesDigitalOption(
-		entrySpot,
-		barrier,
-		timeToExpiry,
-		c.config.Volatility,
-		c.config.InterestRate,
-		c.config.QuantoDrift,
-		params.ContractType,
-	)
-	payout := CalculateAskPayout(params.Stake, probability, c.config.Commission)
 
 	// Determine bid price
 	var bidPrice float64
@@ -626,24 +509,34 @@ func (c *Calculator) calculateBidQuote(ctx context.Context, params *OptionParams
 		// Contract expired - check win condition
 		exitSpotVal := tick.Price
 		exitSpot = &exitSpotVal
+		// AMENDMENT 2: Use tick timestamp for exit spot time
 		exitSpotTimeVal := tick.Timestamp
 		exitSpotTime = &exitSpotTimeVal
 
 		hasWon := c.checkWinCondition(tick.Price, barrier, params.ContractType)
-		bidPrice = CalculateBidPrice(payout, probability, true, hasWon)
+		// Use probability = 1.0 for expired contracts (certainty)
+		bidPrice = CalculateBidPrice(payout, 1.0, true, hasWon)
 	} else {
-		// Contract active - calculate current value
-		remainingTime := expiryTime.Sub(now).Seconds() / (365.25 * 24 * 60 * 60)
-		currentProbability := BlackScholesDigitalOption(
-			tick.Price,
-			barrier,
-			remainingTime,
-			c.config.Volatility,
-			c.config.InterestRate,
-			c.config.QuantoDrift,
-			params.ContractType,
-		)
-		bidPrice = CalculateBidPrice(payout, currentProbability, false, false)
+		// Contract active - calculate current value for early exit
+		// Only time-based contracts support early exit
+		if params.Duration.IsTimeBased() {
+			now := time.Now()
+			remainingTime := expiryTime.Sub(now).Seconds() / (365.25 * 24 * 60 * 60)
+			currentProbability := BlackScholesDigitalOption(
+				tick.Price,
+				barrier,
+				remainingTime,
+				c.config.Volatility,
+				c.config.InterestRate,
+				c.config.QuantoDrift,
+				params.ContractType,
+			)
+			bidPrice = CalculateBidPrice(payout, currentProbability, false, false)
+		} else {
+			// Tick-based contracts: NO early exit support
+			// Bid price not applicable for partial tick completion
+			bidPrice = 0
+		}
 	}
 
 	// Build and return quote
@@ -722,6 +615,23 @@ func (c *Calculator) parseAndValidateParams(params *pb.OptionParameters, require
 		startTime = &st
 	}
 
+	// AMENDMENT: Validate and parse payout for bid requests
+	// Payout must be provided for bid requests and must not be recalculated
+	var payout *float64
+	if requireStartTime {
+		if params.Payout == nil || *params.Payout == "" {
+			return nil, status.Error(codes.InvalidArgument, "payout is required for bid requests")
+		}
+		payoutVal, err := strconv.ParseFloat(*params.Payout, 64)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "Invalid payout format: %s", *params.Payout)
+		}
+		if payoutVal <= 0 {
+			return nil, status.Error(codes.OutOfRange, "Payout must be positive")
+		}
+		payout = &payoutVal
+	}
+
 	return &OptionParams{
 		Symbol:       params.Symbol,
 		ContractType: params.ContractType,
@@ -730,6 +640,7 @@ func (c *Calculator) parseAndValidateParams(params *pb.OptionParameters, require
 		Duration:     *duration,
 		Barrier:      barrier,
 		StartTime:    startTime,
+		Payout:       payout,
 	}, nil
 }
 

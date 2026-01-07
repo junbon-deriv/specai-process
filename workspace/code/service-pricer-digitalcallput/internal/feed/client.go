@@ -71,26 +71,25 @@ func (c *Client) Subscribe(ctx context.Context, symbol string) (<-chan *pricing.
 }
 
 // GetCurrentTick retrieves the current market tick for a symbol
+// AMENDMENT 5: Fixed to use correct endpoint
+// Uses GetLatestTick (unary RPC) instead of StreamTicks (streaming RPC)
+// This is the correct and efficient way to fetch a single current tick
 func (c *Client) GetCurrentTick(ctx context.Context, symbol string) (*pricing.Tick, error) {
-	stream, err := c.client.StreamTicks(ctx, &feedapi.StreamTicksRequest{
+	// CORRECT: Use GetLatestTick unary endpoint for single tick retrieval
+	resp, err := c.client.GetLatestTick(ctx, &feedapi.GetLatestTickRequest{
 		Symbol: symbol,
-		Time:   timestamppb.Now(),
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GetLatestTick failed for symbol %s: %w", symbol, err)
 	}
-	resp, err := stream.Recv()
-	if err != nil {
-		return nil, err
+	if resp.Tick == nil {
+		return nil, fmt.Errorf("no tick available for symbol %s", symbol)
 	}
-	if len(resp.Ticks) == 0 {
-		return nil, fmt.Errorf("no ticks received for symbol %s", symbol)
-	}
-	tick := resp.Ticks[0]
+	
 	return &pricing.Tick{
-		Symbol:    tick.Symbol,
-		Price:     parseQuote(tick.Quote),
-		Timestamp: tick.Time.AsTime(),
+		Symbol:    resp.Tick.Symbol,
+		Price:     parseQuote(resp.Tick.Quote),
+		Timestamp: resp.Tick.Time.AsTime(),
 	}, nil
 }
 
