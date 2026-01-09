@@ -1,0 +1,13 @@
+symbols:
+  - symbol: "USD/JPY"
+    min_stake: "1.00000000"
+    max_payout: "50000.00000000"
+    commission: "0.02000000"
+  - symbol: "EUR/USD"
+    min_stake: "1.00000000"
+    max_payout: "50000.00000000"
+    commission: "0.02000000"
+  - symbol: "BTC/USD"
+    min_stake: "5.00000000"
+    max_payout: "10000.00000000"
+    commission: "0.03000000"
