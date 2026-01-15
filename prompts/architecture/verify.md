@@ -17,6 +17,7 @@ Read all the content related to service architecture:
 * `workspace/output/stories/stories.md`: The user stories document.
 * `workspace/output/requirements/preferences.md`: The document with user directives and clarifications (if it exists).
 * `workspace/output/domain/preferences.md`: Domain modeling preferences (if it exists).
+* `workspace/dependency/service_template_guide.md`: The service template guide (if it exists) - **CRITICAL for service structure verification**.
 
 **Important**: Focus your verification on the service architecture and its alignment with domain model and requirements. Do not read any other verify.md files.
 
@@ -75,6 +76,38 @@ Read all of these at once and then check if the service architecture is complete
 * Are there any missing services that should be added?
 * Are there any services that should be merged or split?
 
+## Service Template Compliance (If `workspace/dependency/service_template_guide.md` exists)
+**CRITICAL**: If the service template guide exists, verify compliance with its patterns:
+
+### Naming Conventions
+* Do service names follow the template naming convention (e.g., `service-pricer-{product}`)?
+* Are module paths structured correctly (e.g., `github.com/regentmarkets/service-pricer-{product}`)?
+
+### Required Components
+* Does the architecture specify the required internal packages based on the component matrix?
+  - Feed Client (`internal/feed/`) - if product needs market data
+  - Config Manager (`internal/config/`) - if product has configuration
+  - Pricer (`internal/pricer/`) - if product has pricing logic
+  - Contract Manager (`internal/contract/`) - if product has business rules
+* Are the required interfaces defined for each component (ConfigProvider, FeedProvider)?
+
+### Dependency Direction Rules
+* Does the architecture follow the dependency graph: `grpcsvc → pricer → (config, feed, contract)`?
+* Does the pricer define interfaces that other packages implement?
+* Is the pricer free from imports of config, feed, or contract packages?
+* Are all packages free from importing grpcsvc?
+
+### API Patterns
+* Is gRPC specified as the primary API protocol?
+* Is the Ask/Bid API pattern implemented where applicable?
+* Are gRPC standard error codes used (not custom errors)?
+* Do gRPC handlers only receive and pass requests (not assembling data from various sources)?
+
+### Strict Rules Compliance
+* Is there NO models, types, or interfaces package? (Dependencies should flow toward core/pricing)
+* Is the service designed to be stateless where possible?
+* Is the configuration structure following the specified YAML format?
+
 # Output
 
 Create a thorough report at `workspace/cache/verify_architecture_architecture.md`. This should explain:
@@ -84,6 +117,7 @@ Create a thorough report at `workspace/cache/verify_architecture_architecture.md
 * Assessment of alignment with domain model
 * Assessment of requirements and story coverage
 * Overall readiness to proceed with service development
+* **Service template compliance status** (if service template guide exists)
 
 Structure the report with these sections:
 - **Summary**: Overall assessment (Ready/Not Ready)
@@ -93,3 +127,9 @@ Structure the report with these sections:
 - **Domain Alignment Analysis**: How well services map to domain boundaries
 - **Coverage Analysis**: Completeness of requirement and story coverage
 - **Dependencies Review**: Assessment of service dependencies and communication patterns
+- **Service Template Compliance** (if `workspace/dependency/service_template_guide.md` exists): Assessment of compliance with service template patterns, including:
+  - Naming convention compliance
+  - Required component coverage
+  - Dependency direction adherence
+  - API pattern compliance
+  - Strict rules violations (if any)

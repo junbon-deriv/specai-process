@@ -1,0 +1,50 @@
+# Build stage
+FROM golang:1.21-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git make
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /doublerisefall ./cmd/doublerisefall
+
+# Runtime stage
+FROM alpine:3.19
+
+# Install ca-certificates for HTTPS calls
+RUN apk --no-cache add ca-certificates
+
+# Create app directory
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /doublerisefall ./doublerisefall
+
+# Copy configuration
+COPY config/symbols.yaml ./config/symbols.yaml
+
+# Expose gRPC port
+EXPOSE 50051
+
+# Set default environment variables
+ENV GRPC_PORT=50051
+ENV CONFIG_PATH=./config/symbols.yaml
+ENV LOG_LEVEL=info
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:50051/health || exit 1
+
+# Run the application
+ENTRYPOINT ["/app/doublerisefall"]
