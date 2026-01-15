@@ -38,6 +38,17 @@ This process operates in one of three modes:
 - You MUST READ `workspace/output/requirements/prd.md`. This file contains the comprehensive product requirements document.
 - **CRITICAL: Check `workspace/output/requirements/preferences.md` for the PRD complexity score** - This score (0-10) determines the appropriate internal structure for services
 
+### SERVICE TEMPLATE GUIDE (Check if exists)
+- **Check if `workspace/dependency/service_template_guide.md` exists**:
+  - If it **exists**: You MUST READ it and follow its conventions for:
+    - Service naming conventions (e.g., `service-pricer-{product}`)
+    - Required component patterns (Feed Client, Config Manager, Pricer, Contract Manager)
+    - Dependency direction rules between internal packages
+    - gRPC/Protocol Buffers patterns
+    - Generated service structure expectations
+  - The architecture document MUST align with the service template guide's patterns and constraints
+  - All service definitions MUST follow the component matrix defined in the guide
+
 ### PREFERENCE HIERARCHY (Check in this order)
 1. **Workspace Preferences** (`workspace/preferences.md`):
    - Check if exists: Contains overarching defaults for this workspace
@@ -106,6 +117,11 @@ The document must include all sections defined in the guideline.md file, includi
 
 3. **Architecture Design**
    - Check PRD complexity score from requirements preferences
+   - **If `workspace/dependency/service_template_guide.md` exists**:
+     - Apply the service template's required component patterns
+     - Follow the dependency direction rules (grpcsvc → pricer → config/feed/contract)
+     - Use the component matrix to determine required internal packages
+     - Ensure service naming follows the template conventions
    - Create comprehensive service definitions
    - **Apply complexity-based internal structure**:
      - Score 0-3: Describe flat, simple structure
