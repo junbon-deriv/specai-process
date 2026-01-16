@@ -1,184 +1,199 @@
 # Development Preferences
 
-> **Created**: 2026-01-15
-> **Last Updated**: 2026-01-15
-> **Scope**: All service implementations in workspace/code
-
----
+This document tracks development decisions and patterns for all service implementations in this workspace.
 
 ## General Development Standards
 
-### Code Quality
-- Follow SOLID principles and clean code practices
-- Write self-documenting code with clear naming
-- Implement comprehensive error handling with context
-- Use structured logging (slog) with request IDs
-- Maintain high test coverage (>80% for business logic)
+### Code Organization
+- **Light modular organization** for complexity 6/10 services
+- Clear separation of concerns: grpcsvc → pricer → implementations
+- Interface-at-consumer pattern: interfaces defined where consumed (in pricer package)
 
-### Testing Strategy
-- Unit tests for all business logic
-- Mock external dependencies using interfaces
-- Cover happy path and error scenarios
-- Test files adjacent to implementation files
-- Use table-driven tests for multiple scenarios
-
----
+### Dependency Direction
+- All dependencies flow toward core logic (pricer)
+- Core logic (pricer) defines interfaces
+- Implementation packages (config, feed, contract) implement these interfaces
+- gRPC layer depends on pricer, never the reverse
 
 ## Technology Stack
 
-### [doublerisefall] Technology Stack
-- **Language**: Go 1.21+
-- **API Protocol**: gRPC with Protocol Buffers v3
-- **Configuration**: YAML with Viper (hot-reload capable)
-- **Logging**: slog (structured logging)
-- **Testing**: Go testing + testify/mock
-- **Build**: Makefile + buf for proto generation
+### Common Frameworks
+- **Go 1.21+**: Primary language for all services
+- **gRPC**: Internal service communication protocol
+- **Protocol Buffers v3**: Message serialization
+- **slog**: Structured logging (stdlib)
+- **Viper/YAML**: Configuration management
 
----
+### External Dependencies
+- **gopkg.in/yaml.v3**: YAML parsing for configuration
+- **google.golang.org/grpc**: Official gRPC implementation
+- **google.golang.org/protobuf**: Protobuf runtime
 
 ## Implementation Patterns
 
-### Architectural Patterns
-- **Dependency Inversion**: Interfaces defined where consumed (in pricer package)
-- **Single Responsibility**: One package per concern
-- **Stateless Design**: All state passed via request context
-- **Clean Boundaries**: gRPC handlers delegate to business logic
+### Service Structure (Complexity 6/10)
+```
+service-pricer-{product}/
+├── cmd/{product}/          # Entry point
+├── config/                 # Configuration files (YAML)
+├── internal/
+│   ├── app/               # DI wiring, lifecycle
+│   ├── config/            # Config loading
+│   ├── contract/          # Validation logic
+│   ├── feed/              # External service wrappers
+│   ├── grpcsvc/           # gRPC handlers (thin)
+│   └── pricer/            # Core domain logic
+└── api/proto/             # Generated protobuf code
+```
 
-### Dependency Direction
-```
-grpcsvc → pricer → (config, feed, contract)
-```
-- grpcsvc depends on pricer
-- pricer defines interfaces
-- config, feed, contract implement interfaces defined in pricer
-- No circular dependencies
+### Interface Definition Pattern
+- Define interfaces in the package that **consumes** them
+- Example: `ConfigProvider`, `FeedProvider` defined in `pricer` package
+- Implementation packages import from pricer, not vice versa
+- No separate `interfaces` package
+
+### Pricing Service Pattern
+Components required for options pricing services:
+1. **pricer**: Fair probability, commission, payout calculation
+2. **contract**: Duration parsing, validation rules
+3. **config**: Symbol configuration from YAML
+4. **feed**: Market data client wrapper
+5. **grpcsvc**: Thin gRPC handlers
+6. **app**: Dependency injection
+
+### Duration Handling
+- Single `Duration` type with unit discriminator (s/m/h/d/t)
+- Separate validation paths for time-based vs tick-based
+- Parse once, validate constraints based on unit type
 
 ### Error Handling
-- Return domain errors with context
-- Map domain errors to gRPC status codes in grpcsvc
-- Use standard error codes (ERR-DF-XXX format)
-- Log errors with structured fields
-
-### Interface Design
-- Define interfaces where consumed (not in separate package)
-- Keep interfaces minimal and focused
-- Use internal types in interfaces (not proto types)
-
----
+- Domain errors defined in pricer package
+- gRPC layer maps domain errors to status codes
+- Use standard gRPC codes: INVALID_ARGUMENT, FAILED_PRECONDITION, UNAVAILABLE, INTERNAL
+- Include error codes in messages (e.g., "ERR-DR-S1V: invalid symbol")
 
 ## Code Organization
 
-### Package Structure (Standard Complexity)
-```
-service-pricer-{product}/
-├── api/                    # Generated code (do not edit)
-├── cmd/{product}/          # Entry point
-├── config/                 # Configuration files
-├── internal/
-│   ├── app/               # Application initialization
-│   ├── config/            # Config loading
-│   ├── contract/          # Business rules & validation
-│   ├── feed/              # External service wrapper
-│   ├── grpcsvc/           # gRPC handlers
-│   ├── pricer/            # Core business logic
-│   └── tools/             # Build tools
-└── proto/{product}/v1/    # API definitions
-```
+### Package Responsibilities
+| Package | Imports From | Exports | Purpose |
+|---------|-------------|---------|---------|
+| `pricer` | None | Pricing logic, interfaces | Core domain |
+| `contract` | `pricer` | Validation implementation | Implements ContractValidator |
+| `config` | `pricer` | Config management | Implements ConfigProvider |
+| `feed` | `pricer` | Feed wrapper | Implements FeedProvider |
+| `grpcsvc` | `pricer` | gRPC handlers | Protocol adapter |
+| `app` | All | Application lifecycle | Wiring |
 
-### File Naming Conventions
-- Package names: lowercase, single word
-- Test files: `{filename}_test.go`
-- Interface definitions: In consuming package
-- Proto files: `{service}.proto` in versioned directory
-
----
+### No Circular Dependencies
+- pricer MUST NOT import from contract, config, or feed
+- grpcsvc MUST NOT be imported by any internal package
+- Clean dependency graph ensures testability
 
 ## Integration Approach
 
-### Service-Feed Integration
-- **MUST** use `github.com/regentmarkets/service-feed/client`
-- Create thin wrapper in `internal/feed` package
-- Handle `is_final` flag appropriately
-- Implement retry logic via client configuration
-- Support streaming with context cancellation
+### External Service Integration
+- **Pattern**: Thin wrapper around external clients
+- **Location**: `internal/feed/` (or service-specific name)
+- **Interface**: Defined in consuming package (pricer)
+- **Types**: Convert external types to domain types at boundary
 
-### Configuration Management
-- Load YAML config at startup using Viper
-- Support hot-reload capability
-- Validate configuration on load
-- Return errors for missing/invalid config (no defaults)
+### Service Feed Integration
+- Use `github.com/regentmarkets/service-feed/client` directly
+- Create wrapper implementing `FeedProvider` interface
+- Convert proto Tick to domain Tick at wrapper boundary
+- Handle reconnection logic in wrapper
 
-### gRPC Service Implementation
-- Implement standard gRPC health check protocol
-- Support graceful shutdown
-- Use context for cancellation
-- Implement streaming with proper cleanup
-- Return standard gRPC status codes
+## Configuration Management
 
----
+### Configuration Files
+- **Format**: YAML
+- **Location**: `config/` directory
+- **Loading**: At startup with hot-reload capability
+- **Structure**: Per-symbol configuration with defaults
 
-## Design Decisions
+### Environment Variables
+- Use for runtime configuration (ports, addresses)
+- Document all variables in `.env.example`
+- Provide sensible defaults in code
 
-### [doublerisefall] Duration Handling
-- **Decision**: Single Duration type with unit discriminator
-- **Rationale**: Simplifies validation and expiry calculation
-- **Implementation**: `Duration{Value int64, Unit string, IsTickBased bool}`
+## Testing Strategy
 
-### [doublerisefall] Pricing Formula
-- **Decision**: Implement arcsin correlation formula for fair probability
-- **Formula**: `P_fair = 1/4 + arcsin(√(t₁/t₂))/(2π)`
-- **Rationale**: Product specification requirement
-- **Precision**: Use float64 for calculations, string for API
+### Test Organization
+- Tests adjacent to implementation files
+- Use table-driven tests for multiple scenarios
+- Mock interfaces for unit tests
+- Integration tests at package boundaries
 
-### [doublerisefall] Win/Loss Evaluation
-- **Decision**: Short-circuit evaluation at t1 failure
-- **Rationale**: Performance optimization (no need to check t2 if t1 fails)
-- **Implementation**: Check barrier condition at t1 before fetching t2 tick
-
----
-
-## Trade-offs
-
-### Proto Generation vs Manual Code
-- **Choice**: Use buf for proto generation
-- **Trade-off**: Less control but consistent with ecosystem
-- **Benefit**: Standard tooling, reproducible builds
-
-### Configuration Hot-Reload
-- **Choice**: Implement using Viper watch capability
-- **Trade-off**: Additional complexity for configuration changes
-- **Benefit**: No service restart required for symbol config updates
-
-### Streaming Implementation
-- **Choice**: Goroutine-per-stream with context cancellation
-- **Trade-off**: Memory overhead for many concurrent streams
-- **Benefit**: Simple implementation, good performance for target load (1000 streams)
-
----
+### Coverage Goals
+- High coverage for business logic (pricer, contract)
+- Integration tests for gRPC handlers
+- Mock external dependencies (feed client)
 
 ## Deployment Standards
 
 ### Containerization
-- Multi-stage Dockerfile (builder + runtime)
-- Alpine Linux base for minimal size
-- Include CA certificates for external HTTPS calls
-- Copy config files into container
+- Multi-stage Docker builds
+- Alpine base image for minimal size
+- Non-root user for security
+- Health check included in Dockerfile
 
-### Environment Variables
-- `GRPC_PORT`: gRPC server port (default: 50051)
-- `FEED_SERVICE_ADDR`: service-feed address (required)
-- `CONFIG_PATH`: Path to symbols.yaml (default: /config/symbols.yaml)
-- `LOG_LEVEL`: Logging level (default: info)
+### Build Automation
+- Makefile for common tasks
+- Targets: build, test, clean, docker-build, lint
+- Simple and consistent across services
 
-### Health Checks
-- Implement gRPC health check protocol
-- Return SERVING when ready
-- Check feed service connectivity in health check
+## Logging Standards
+
+### Structured Logging
+- Use `slog` for all logging
+- JSON format for production
+- Log levels: debug, info, warn, error
+- Include context: operation, symbol, error details
+
+### What to Log
+- **Debug**: Detailed operation flow, pricing calculations
+- **Info**: Startup, configuration loaded, major operations
+- **Error**: All error conditions with context
+
+## Service-Specific Decisions
+
+### [service-pricer-doublerisefall] Double Rise/Fall Pricing
+
+**Technology Choices**:
+- Go 1.21+, gRPC, Protocol Buffers, slog, Viper
+- service-feed client wrapper for market data
+
+**Implementation Decisions**:
+- Bivariate normal pricing formula in pricer package
+- Duration type with unit discriminator for time/tick handling
+- Separate evaluation logic for RISE vs FALL contract types
+- Stream implementation: goroutine per stream with ticker for time-based updates
+
+**Design Patterns**:
+- Interface-at-consumer: pricer defines ConfigProvider, FeedProvider, ContractValidator
+- Dependency injection in app package
+- Stateless design: all state in request context
+
+**Trade-offs**:
+- Using float64 for calculations (acceptable for current precision requirements)
+- No caching (market data must be real-time)
+- Streaming: 5-second ticker + on-tick updates (balance between freshness and load)
+
+**Validation Rules**:
+- Duration gap: 10s minimum (time), 2t minimum (ticks)
+- Duration range: 10s-1day (time), 2-10 ticks
+- Payout validation against configured maximum
 
 ---
 
-## Version History
+## Future Considerations
 
-| Date | Service | Changes |
-|------|---------|---------|
-| 2026-01-15 | doublerisefall | Initial service implementation preferences |
+- Consider `shopspring/decimal` if higher precision needed
+- Metrics/instrumentation for production monitoring
+- Rate limiting at gRPC layer if needed
+- Circuit breaker for external dependencies
+
+---
+
+**Last Updated**: 2026-01-15
+**Services**: service-pricer-doublerisefall

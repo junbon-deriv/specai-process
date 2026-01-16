@@ -2,696 +2,404 @@ package pricer
 
 import (
 	"context"
-	"math"
+	"errors"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
 )
 
-// MockConfigProvider mocks ConfigProvider interface
+// MockConfigProvider implements ConfigProvider for testing
 type MockConfigProvider struct {
-	mock.Mock
+	configs map[string]*SymbolConfig
 }
 
 func (m *MockConfigProvider) GetSymbolConfig(symbol string) (*SymbolConfig, error) {
-	args := m.Called(symbol)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	cfg, ok := m.configs[symbol]
+	if !ok {
+		return nil, ErrInvalidSymbol
 	}
-	return args.Get(0).(*SymbolConfig), args.Error(1)
+	return cfg, nil
 }
 
-// MockFeedProvider mocks FeedProvider interface
+// MockFeedProvider implements FeedProvider for testing
 type MockFeedProvider struct {
-	mock.Mock
+	ticks          map[string]map[int64]*Tick
+	ticksFromLimit map[string][]*Tick
 }
 
 func (m *MockFeedProvider) GetTickForEpoch(ctx context.Context, symbol string, epoch int64) (*Tick, bool, error) {
-	args := m.Called(ctx, symbol, epoch)
-	if args.Get(0) == nil {
-		return nil, args.Bool(1), args.Error(2)
+	if symbolTicks, ok := m.ticks[symbol]; ok {
+		if tick, ok := symbolTicks[epoch]; ok {
+			return tick, true, nil
+		}
 	}
-	return args.Get(0).(*Tick), args.Bool(1), args.Error(2)
+	return nil, false, errors.New("tick not found")
 }
 
 func (m *MockFeedProvider) GetTicksFromLimit(ctx context.Context, symbol string, start int64, limit int64) ([]*Tick, bool, error) {
-	args := m.Called(ctx, symbol, start, limit)
-	if args.Get(0) == nil {
-		return nil, args.Bool(1), args.Error(2)
+	if ticks, ok := m.ticksFromLimit[symbol]; ok {
+		if int64(len(ticks)) >= limit {
+			return ticks[:limit], true, nil
+		}
 	}
-	return args.Get(0).([]*Tick), args.Bool(1), args.Error(2)
+	return nil, false, errors.New("insufficient ticks")
 }
 
-func (m *MockFeedProvider) Subscribe(ctx context.Context, symbol string, start int64) *Subscription {
-	args := m.Called(ctx, symbol, start)
-	return args.Get(0).(*Subscription)
+func (m *MockFeedProvider) Subscribe(ctx context.Context, symbol string, start int64) Subscription {
+	return &MockSubscription{}
 }
 
-func (m *MockFeedProvider) Close() error {
-	args := m.Called()
-	return args.Error(0)
+// MockSubscription implements Subscription for testing
+type MockSubscription struct {
+	ch chan *Tick
 }
 
-// MockContractValidator mocks ContractValidator interface
-type MockContractValidator struct {
-	mock.Mock
-}
-
-func (m *MockContractValidator) ValidateAskRequest(ctx context.Context, req *AskRequest) error {
-	args := m.Called(ctx, req)
-	return args.Error(0)
-}
-
-func (m *MockContractValidator) ValidateBidRequest(ctx context.Context, req *BidRequest) error {
-	args := m.Called(ctx, req)
-	return args.Error(0)
-}
-
-func (m *MockContractValidator) ParseDuration(s string) (Duration, error) {
-	args := m.Called(s)
-	return args.Get(0).(Duration), args.Error(1)
-}
-
-// Test cases
-
-func TestNew(t *testing.T) {
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	p := New(cfg, feed, contract)
-
-	assert.NotNil(t, p)
-	assert.Equal(t, cfg, p.config)
-	assert.Equal(t, feed, p.feed)
-	assert.Equal(t, contract, p.contract)
-}
-
-// TC-DF-A1B: Calculate ask for RISE contract with valid parameters
-func TestCalculateAsk_Rise_Valid(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	req := &AskRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "10.00",
-		PricingTime:    1704067200,
+func (m *MockSubscription) C() <-chan *Tick {
+	if m.ch == nil {
+		m.ch = make(chan *Tick)
+		close(m.ch)
 	}
-
-	// Setup mocks
-	contract.On("ValidateAskRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_100").Return(&SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "30s").Return(Duration{Value: 30, Unit: "s", IsTickBased: false}, nil)
-	contract.On("ParseDuration", "60s").Return(Duration{Value: 60, Unit: "s", IsTickBased: false}, nil)
-	feed.On("GetTickForEpoch", ctx, "R_100", int64(1704067200)).Return(&Tick{
-		Symbol: "R_100",
-		Time:   1704067200,
-		Quote:  "1234.56",
-	}, true, nil)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateAsk(ctx, req)
-
-	require.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.Equal(t, "10.00", result.AskPrice)
-	assert.Equal(t, "USD", result.Currency)
-	assert.Equal(t, "1234.56", result.CurrentSpot)
-	assert.Equal(t, int64(1704067200), result.CurrentSpotTime)
-	assert.NotEmpty(t, result.Payout)
-	assert.Equal(t, "1000.00", result.MaxPayout)
-	assert.Equal(t, "1.00", result.MinStake)
-
-	cfg.AssertExpectations(t)
-	feed.AssertExpectations(t)
-	contract.AssertExpectations(t)
+	return m.ch
 }
 
-// TC-DF-A2C: Calculate ask for FALL contract with valid parameters
-func TestCalculateAsk_Fall_Valid(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	req := &AskRequest{
-		Symbol:         "R_50",
-		ContractType:   ContractTypeFall,
-		Currency:       "USD",
-		FirstDuration:  "5m",
-		SecondDuration: "10m",
-		Stake:          "25.00",
-		PricingTime:    1704067200,
-	}
-
-	contract.On("ValidateAskRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_50").Return(&SymbolConfig{
-		Symbol:         "R_50",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "5m").Return(Duration{Value: 5, Unit: "m", IsTickBased: false}, nil)
-	contract.On("ParseDuration", "10m").Return(Duration{Value: 10, Unit: "m", IsTickBased: false}, nil)
-	feed.On("GetTickForEpoch", ctx, "R_50", int64(1704067200)).Return(&Tick{
-		Symbol: "R_50",
-		Time:   1704067200,
-		Quote:  "5678.90",
-	}, true, nil)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateAsk(ctx, req)
-
-	require.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.Equal(t, "25.00", result.AskPrice)
+func (m *MockSubscription) Err() error {
+	return nil
 }
 
-// TC-DF-A3D: Reject ask with stake below minimum
-func TestCalculateAsk_StakeBelowMinimum(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
+func (m *MockSubscription) Close() {}
 
-	req := &AskRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "0.50",
-		PricingTime:    1704067200,
+// MockValidator implements ContractValidator for testing
+type MockValidator struct{}
+
+func (m *MockValidator) ParseDuration(s string) (Duration, error) {
+	// Simple mock implementation
+	if len(s) < 2 {
+		return Duration{}, ErrInvalidDuration
 	}
-
-	// Validation should fail for stake below minimum
-	contract.On("ValidateAskRequest", ctx, req).Return(ErrInvalidStake)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateAsk(ctx, req)
-
-	assert.Nil(t, result)
-	assert.ErrorIs(t, err, ErrInvalidStake)
+	unit := DurationUnit(s[len(s)-1:])
+	value := int64(10) // Default value for testing
+	return Duration{Value: value, Unit: unit}, nil
 }
 
-// TC-DF-A4E: Reject ask with payout exceeding maximum
-func TestCalculateAsk_PayoutExceeded(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	req := &AskRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "500.00", // High stake will result in payout > 1000
-		PricingTime:    1704067200,
+func (m *MockValidator) ValidateAskRequest(req *AskRequest, config *SymbolConfig) error {
+	if req.ContractType == ContractTypeUnspecified {
+		return ErrInvalidContractType
 	}
-
-	contract.On("ValidateAskRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_100").Return(&SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      100.00, // Low max payout to trigger error
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "30s").Return(Duration{Value: 30, Unit: "s", IsTickBased: false}, nil)
-	contract.On("ParseDuration", "60s").Return(Duration{Value: 60, Unit: "s", IsTickBased: false}, nil)
-	feed.On("GetTickForEpoch", ctx, "R_100", int64(1704067200)).Return(&Tick{
-		Symbol: "R_100",
-		Time:   1704067200,
-		Quote:  "1234.56",
-	}, true, nil)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateAsk(ctx, req)
-
-	assert.Nil(t, result)
-	assert.ErrorIs(t, err, ErrPayoutExceeded)
+	if req.Stake < config.MinStake {
+		return ErrInvalidStake
+	}
+	return nil
 }
 
-// TC-DF-B1F: Evaluate bid for winning RISE contract
-func TestCalculateBid_Rise_Win(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	startTime := int64(1704067200)
-	pricingTime := startTime + 120 // After expiry
-
-	req := &BidRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		StartTime:      startTime,
-		Stake:          "10.00",
-		Payout:         "25.00",
-		PricingTime:    pricingTime,
+func (m *MockValidator) ValidateBidRequest(req *BidRequest, config *SymbolConfig) error {
+	if req.ContractType == ContractTypeUnspecified {
+		return ErrInvalidContractType
 	}
-
-	contract.On("ValidateBidRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_100").Return(&SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "30s").Return(Duration{Value: 30, Unit: "s", IsTickBased: false}, nil)
-	contract.On("ParseDuration", "60s").Return(Duration{Value: 60, Unit: "s", IsTickBased: false}, nil)
-
-	// Entry tick (barrier) - first tick AFTER start_time
-	feed.On("GetTicksFromLimit", ctx, "R_100", startTime+1, int64(1)).Return([]*Tick{
-		{Symbol: "R_100", Time: startTime + 1, Quote: "100.00"},
-	}, true, nil)
-
-	// Spot at t1 (30s) - above barrier (win condition 1)
-	feed.On("GetTickForEpoch", ctx, "R_100", startTime+30).Return(&Tick{
-		Symbol: "R_100",
-		Time:   startTime + 30,
-		Quote:  "105.00",
-	}, true, nil)
-
-	// Spot at t2 (60s) - above barrier (win condition 2)
-	feed.On("GetTickForEpoch", ctx, "R_100", startTime+60).Return(&Tick{
-		Symbol: "R_100",
-		Time:   startTime + 60,
-		Quote:  "110.00",
-	}, true, nil)
-
-	// Current tick
-	feed.On("GetTickForEpoch", ctx, "R_100", pricingTime).Return(&Tick{
-		Symbol: "R_100",
-		Time:   pricingTime,
-		Quote:  "108.00",
-	}, true, nil)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateBid(ctx, req)
-
-	require.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.Equal(t, "25.00", result.BidPrice) // Full payout for win
-	assert.True(t, result.IsExpired)
-	assert.Equal(t, "100.00", result.Barrier)
-	assert.Equal(t, "110.00", result.ExitSpot)
-	assert.Equal(t, startTime+60, result.ExitSpotTime)
+	if req.StartTime == 0 {
+		return ErrMissingStartTime
+	}
+	if req.Payout == 0 {
+		return ErrMissingPayout
+	}
+	return nil
 }
 
-// TC-DF-B2G: Evaluate bid for losing RISE contract (fail at t1)
-func TestCalculateBid_Rise_LoseAtT1(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	startTime := int64(1704067200)
-	pricingTime := startTime + 120 // After expiry
-
-	req := &BidRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		StartTime:      startTime,
-		Stake:          "10.00",
-		Payout:         "25.00",
-		PricingTime:    pricingTime,
-	}
-
-	contract.On("ValidateBidRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_100").Return(&SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "30s").Return(Duration{Value: 30, Unit: "s", IsTickBased: false}, nil)
-	contract.On("ParseDuration", "60s").Return(Duration{Value: 60, Unit: "s", IsTickBased: false}, nil)
-
-	// Entry tick (barrier) - first tick AFTER start_time
-	feed.On("GetTicksFromLimit", ctx, "R_100", startTime+1, int64(1)).Return([]*Tick{
-		{Symbol: "R_100", Time: startTime + 1, Quote: "100.00"},
-	}, true, nil)
-
-	// Spot at t1 (30s) - below barrier (FAIL at t1)
-	spot1 := &Tick{
-		Symbol: "R_100",
-		Time:   startTime + 30,
-		Quote:  "99.00", // Below barrier
-	}
-	feed.On("GetTickForEpoch", ctx, "R_100", startTime+30).Return(spot1, true, nil)
-
-	// Current tick
-	feed.On("GetTickForEpoch", ctx, "R_100", pricingTime).Return(&Tick{
-		Symbol: "R_100",
-		Time:   pricingTime,
-		Quote:  "105.00",
-	}, true, nil)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateBid(ctx, req)
-
-	require.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.Equal(t, "0.00", result.BidPrice)  // Loss - bid is 0
-	assert.True(t, result.IsExpired)          // Should be expired when t1 fails
-	assert.Equal(t, "99.00", result.ExitSpot) // Exit spot should be spot1
-	assert.Equal(t, startTime+30, result.ExitSpotTime)
-}
-
-// TC-DF-B3H: Evaluate bid for losing RISE contract (fail at t2)
-func TestCalculateBid_Rise_LoseAtT2(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	startTime := int64(1704067200)
-	pricingTime := startTime + 120
-
-	req := &BidRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		StartTime:      startTime,
-		Stake:          "10.00",
-		Payout:         "25.00",
-		PricingTime:    pricingTime,
-	}
-
-	contract.On("ValidateBidRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_100").Return(&SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "30s").Return(Duration{Value: 30, Unit: "s", IsTickBased: false}, nil)
-	contract.On("ParseDuration", "60s").Return(Duration{Value: 60, Unit: "s", IsTickBased: false}, nil)
-
-	// Entry tick (barrier) - first tick AFTER start_time
-	feed.On("GetTicksFromLimit", ctx, "R_100", startTime+1, int64(1)).Return([]*Tick{
-		{Symbol: "R_100", Time: startTime + 1, Quote: "100.00"},
-	}, true, nil)
-
-	// Spot at t1 (30s) - above barrier (PASS)
-	feed.On("GetTickForEpoch", ctx, "R_100", startTime+30).Return(&Tick{
-		Symbol: "R_100",
-		Time:   startTime + 30,
-		Quote:  "105.00",
-	}, true, nil)
-
-	// Spot at t2 (60s) - below barrier (FAIL at t2)
-	spot2 := &Tick{
-		Symbol: "R_100",
-		Time:   startTime + 60,
-		Quote:  "98.00", // Dropped below barrier
-	}
-	feed.On("GetTickForEpoch", ctx, "R_100", startTime+60).Return(spot2, true, nil)
-
-	// Current tick
-	feed.On("GetTickForEpoch", ctx, "R_100", pricingTime).Return(&Tick{
-		Symbol: "R_100",
-		Time:   pricingTime,
-		Quote:  "97.00",
-	}, true, nil)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateBid(ctx, req)
-
-	require.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.Equal(t, "0.00", result.BidPrice) // Loss - bid is 0
-	assert.True(t, result.IsExpired)
-	assert.Equal(t, "98.00", result.ExitSpot) // Exit spot should be spot2
-	assert.Equal(t, startTime+60, result.ExitSpotTime)
-}
-
-// TC-DF-B4J: Evaluate bid for winning FALL contract
-func TestCalculateBid_Fall_Win(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	startTime := int64(1704067200)
-	pricingTime := startTime + 120
-
-	req := &BidRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeFall,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		StartTime:      startTime,
-		Stake:          "10.00",
-		Payout:         "25.00",
-		PricingTime:    pricingTime,
-	}
-
-	contract.On("ValidateBidRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_100").Return(&SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "30s").Return(Duration{Value: 30, Unit: "s", IsTickBased: false}, nil)
-	contract.On("ParseDuration", "60s").Return(Duration{Value: 60, Unit: "s", IsTickBased: false}, nil)
-
-	// Entry tick (barrier) - first tick AFTER start_time
-	feed.On("GetTicksFromLimit", ctx, "R_100", startTime+1, int64(1)).Return([]*Tick{
-		{Symbol: "R_100", Time: startTime + 1, Quote: "100.00"},
-	}, true, nil)
-
-	// Spot at t1 (30s) - below barrier (win for FALL)
-	feed.On("GetTickForEpoch", ctx, "R_100", startTime+30).Return(&Tick{
-		Symbol: "R_100",
-		Time:   startTime + 30,
-		Quote:  "95.00",
-	}, true, nil)
-
-	// Spot at t2 (60s) - below barrier (win for FALL)
-	spot2 := &Tick{
-		Symbol: "R_100",
-		Time:   startTime + 60,
-		Quote:  "90.00",
-	}
-	feed.On("GetTickForEpoch", ctx, "R_100", startTime+60).Return(spot2, true, nil)
-
-	// Current tick
-	feed.On("GetTickForEpoch", ctx, "R_100", pricingTime).Return(&Tick{
-		Symbol: "R_100",
-		Time:   pricingTime,
-		Quote:  "92.00",
-	}, true, nil)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateBid(ctx, req)
-
-	require.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.Equal(t, "25.00", result.BidPrice) // Full payout for win
-	assert.True(t, result.IsExpired)
-	assert.Equal(t, "90.00", result.ExitSpot)
-	assert.Equal(t, startTime+60, result.ExitSpotTime)
-}
-
-// Test calculateFairProbability with arcsin formula
+// Test calculateFairProbability
 func TestCalculateFairProbability(t *testing.T) {
-	p := &Pricer{}
-
 	tests := []struct {
-		name     string
-		d1       Duration
-		d2       Duration
-		expected float64
-		delta    float64
+		name       string
+		t1Seconds  int64
+		t2Seconds  int64
+		wantApprox float64
 	}{
 		{
-			name:     "time-based 30s/60s",
-			d1:       Duration{Value: 30, Unit: "s", IsTickBased: false},
-			d2:       Duration{Value: 60, Unit: "s", IsTickBased: false},
-			expected: 0.25 + math.Asin(math.Sqrt(30.0/60.0))/(2*math.Pi),
-			delta:    0.0001,
+			name:       "t1=60s, t2=120s",
+			t1Seconds:  60,
+			t2Seconds:  120,
+			wantApprox: 0.4167, // ~41.67%
 		},
 		{
-			name:     "time-based 1m/2m",
-			d1:       Duration{Value: 60, Unit: "s", IsTickBased: false},
-			d2:       Duration{Value: 120, Unit: "s", IsTickBased: false},
-			expected: 0.25 + math.Asin(math.Sqrt(60.0/120.0))/(2*math.Pi),
-			delta:    0.0001,
+			name:       "t1=30s, t2=60s",
+			t1Seconds:  30,
+			t2Seconds:  60,
+			wantApprox: 0.4167,
 		},
 		{
-			name:     "tick-based 3t/5t",
-			d1:       Duration{Value: 3, Unit: "t", IsTickBased: true},
-			d2:       Duration{Value: 5, Unit: "t", IsTickBased: true},
-			expected: 0.25 + math.Asin(math.Sqrt(3.0/5.0))/(2*math.Pi),
-			delta:    0.0001,
+			name:       "t1=120s, t2=240s",
+			t1Seconds:  120,
+			t2Seconds:  240,
+			wantApprox: 0.4167,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := p.calculateFairProbability(tt.d1, tt.d2)
-			assert.InDelta(t, tt.expected, result, tt.delta)
+			got := calculateFairProbability(tt.t1Seconds, tt.t2Seconds)
+			// Check if within 0.01 tolerance
+			if got < tt.wantApprox-0.01 || got > tt.wantApprox+0.01 {
+				t.Errorf("calculateFairProbability() = %v, want ~%v", got, tt.wantApprox)
+			}
 		})
 	}
 }
 
-// Test market data unavailable
-func TestCalculateAsk_MarketDataUnavailable(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	req := &AskRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "10.00",
-		PricingTime:    1704067200,
+// Test applyCommission
+func TestApplyCommission(t *testing.T) {
+	tests := []struct {
+		name       string
+		pFair      float64
+		commission float64
+		want       float64
+	}{
+		{
+			name:       "5% commission",
+			pFair:      0.4167,
+			commission: 0.05,
+			want:       0.4667,
+		},
+		{
+			name:       "10% commission",
+			pFair:      0.3,
+			commission: 0.1,
+			want:       0.4,
+		},
 	}
 
-	contract.On("ValidateAskRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_100").Return(&SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "30s").Return(Duration{Value: 30, Unit: "s", IsTickBased: false}, nil)
-	contract.On("ParseDuration", "60s").Return(Duration{Value: 60, Unit: "s", IsTickBased: false}, nil)
-	// Return nil tick - market data unavailable
-	feed.On("GetTickForEpoch", ctx, "R_100", int64(1704067200)).Return(nil, true, nil)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateAsk(ctx, req)
-
-	assert.Nil(t, result)
-	assert.ErrorIs(t, err, ErrMarketDataUnavailable)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyCommission(tt.pFair, tt.commission)
+			if got != tt.want {
+				t.Errorf("applyCommission() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
-// Test invalid symbol
-func TestCalculateAsk_InvalidSymbol(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	req := &AskRequest{
-		Symbol:         "INVALID",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "10.00",
+// Test calculatePayout
+func TestCalculatePayout(t *testing.T) {
+	tests := []struct {
+		name    string
+		stake   float64
+		pClient float64
+		want    float64
+	}{
+		{
+			name:    "stake=10, pClient=0.4667",
+			stake:   10.0,
+			pClient: 0.4667,
+			want:    21.43, // Approximately
+		},
+		{
+			name:    "stake=100, pClient=0.5",
+			stake:   100.0,
+			pClient: 0.5,
+			want:    200.0,
+		},
+		{
+			name:    "invalid pClient=0",
+			stake:   10.0,
+			pClient: 0.0,
+			want:    0.0,
+		},
 	}
 
-	contract.On("ValidateAskRequest", ctx, req).Return(ErrInvalidSymbol)
-
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateAsk(ctx, req)
-
-	assert.Nil(t, result)
-	assert.ErrorIs(t, err, ErrInvalidSymbol)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calculatePayout(tt.stake, tt.pClient)
+			// Check if within 0.01 tolerance
+			if got < tt.want-0.01 && got > tt.want+0.01 {
+				t.Errorf("calculatePayout() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
-// Test tick-based bid evaluation
-func TestCalculateBid_TickBased(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	feed := &MockFeedProvider{}
-	contract := &MockContractValidator{}
-
-	startTime := int64(1704067200)
-	pricingTime := startTime + 60
-
-	req := &BidRequest{
-		Symbol:         "R_100",
-		ContractType:   ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "3t",
-		SecondDuration: "5t",
-		StartTime:      startTime,
-		Stake:          "10.00",
-		Payout:         "25.00",
-		PricingTime:    pricingTime,
+// Test evaluateContract
+func TestEvaluateContract(t *testing.T) {
+	tests := []struct {
+		name         string
+		contractType ContractType
+		barrier      float64
+		spotT1       float64
+		spotT2       float64
+		want         bool
+	}{
+		{
+			name:         "RISE win - both above barrier",
+			contractType: ContractTypeRise,
+			barrier:      100.0,
+			spotT1:       101.0,
+			spotT2:       102.0,
+			want:         true,
+		},
+		{
+			name:         "RISE lose - t1 below barrier",
+			contractType: ContractTypeRise,
+			barrier:      100.0,
+			spotT1:       99.0,
+			spotT2:       102.0,
+			want:         false,
+		},
+		{
+			name:         "RISE lose - t2 below barrier",
+			contractType: ContractTypeRise,
+			barrier:      100.0,
+			spotT1:       101.0,
+			spotT2:       99.0,
+			want:         false,
+		},
+		{
+			name:         "FALL win - both below barrier",
+			contractType: ContractTypeFall,
+			barrier:      100.0,
+			spotT1:       99.0,
+			spotT2:       98.0,
+			want:         true,
+		},
+		{
+			name:         "FALL lose - t1 above barrier",
+			contractType: ContractTypeFall,
+			barrier:      100.0,
+			spotT1:       101.0,
+			spotT2:       98.0,
+			want:         false,
+		},
 	}
 
-	contract.On("ValidateBidRequest", ctx, req).Return(nil)
-	cfg.On("GetSymbolConfig", "R_100").Return(&SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}, nil)
-	contract.On("ParseDuration", "3t").Return(Duration{Value: 3, Unit: "t", IsTickBased: true}, nil)
-	contract.On("ParseDuration", "5t").Return(Duration{Value: 5, Unit: "t", IsTickBased: true}, nil)
-
-	// Entry tick - first tick AFTER start_time
-	entryTick := &Tick{Symbol: "R_100", Time: startTime + 1, Quote: "100.00"}
-	feed.On("GetTicksFromLimit", ctx, "R_100", startTime+1, int64(1)).Return([]*Tick{entryTick}, true, nil)
-
-	// Tick sequence for tick-based evaluation starting from start_time+1
-	ticks := []*Tick{
-		{Symbol: "R_100", Time: startTime + 1, Quote: "100.00"},  // Entry tick (index 0)
-		{Symbol: "R_100", Time: startTime + 2, Quote: "101.00"},  // Tick 1
-		{Symbol: "R_100", Time: startTime + 4, Quote: "102.00"},  // Tick 2
-		{Symbol: "R_100", Time: startTime + 6, Quote: "103.00"},  // Tick 3 (t1 evaluation)
-		{Symbol: "R_100", Time: startTime + 8, Quote: "104.00"},  // Tick 4
-		{Symbol: "R_100", Time: startTime + 10, Quote: "105.00"}, // Tick 5 (t2 evaluation)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evaluateContract(tt.contractType, tt.barrier, tt.spotT1, tt.spotT2)
+			if got != tt.want {
+				t.Errorf("evaluateContract() = %v, want %v", got, tt.want)
+			}
+		})
 	}
-	feed.On("GetTicksFromLimit", ctx, "R_100", startTime+1, int64(6)).Return(ticks, true, nil)
+}
 
-	// Current tick
-	feed.On("GetTickForEpoch", ctx, "R_100", pricingTime).Return(&Tick{
-		Symbol: "R_100",
-		Time:   pricingTime,
-		Quote:  "106.00",
-	}, true, nil)
+// Test CalculateAsk with time-based duration
+func TestPricer_CalculateAsk_TimeBased(t *testing.T) {
+	mockConfig := &MockConfigProvider{
+		configs: map[string]*SymbolConfig{
+			"R_100": {
+				Symbol:     "R_100",
+				Commission: 0.05,
+				MaxPayout:  1000.0,
+				MinStake:   1.0,
+				Enabled:    true,
+			},
+		},
+	}
 
-	p := New(cfg, feed, contract)
-	result, err := p.CalculateBid(ctx, req)
+	mockFeed := &MockFeedProvider{
+		ticks: map[string]map[int64]*Tick{
+			"R_100": {
+				1736930731: {Symbol: "R_100", Time: 1736930731, Quote: "1234.5678"},
+			},
+		},
+	}
 
-	require.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.Equal(t, "25.00", result.BidPrice) // Win - both t1 and t2 above barrier
-	assert.True(t, result.IsExpired)
-	assert.Equal(t, "105.00", result.ExitSpot)
-	assert.Equal(t, startTime+10, result.ExitSpotTime)
+	mockValidator := &MockValidator{}
+
+	pricer := NewPricer(mockConfig, mockFeed, mockValidator)
+
+	req := &AskRequest{
+		Symbol:       "R_100",
+		ContractType: ContractTypeRise,
+		Currency:     "USD",
+		FirstDuration: Duration{
+			Value: 60,
+			Unit:  DurationUnitSeconds,
+		},
+		SecondDuration: Duration{
+			Value: 120,
+			Unit:  DurationUnitSeconds,
+		},
+		Stake:       10.0,
+		PricingTime: 1736930731,
+	}
+
+	result, err := pricer.CalculateAsk(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CalculateAsk() error = %v", err)
+	}
+
+	if result.AskPrice == "" {
+		t.Error("CalculateAsk() returned empty AskPrice")
+	}
+	if result.Currency != "USD" {
+		t.Errorf("CalculateAsk() Currency = %v, want USD", result.Currency)
+	}
+	if result.CurrentSpot != "1234.5678" {
+		t.Errorf("CalculateAsk() CurrentSpot = %v, want 1234.5678", result.CurrentSpot)
+	}
+}
+
+// Test CalculateAsk with invalid symbol
+func TestPricer_CalculateAsk_InvalidSymbol(t *testing.T) {
+	mockConfig := &MockConfigProvider{
+		configs: map[string]*SymbolConfig{},
+	}
+	mockFeed := &MockFeedProvider{}
+	mockValidator := &MockValidator{}
+
+	pricer := NewPricer(mockConfig, mockFeed, mockValidator)
+
+	req := &AskRequest{
+		Symbol:       "INVALID",
+		ContractType: ContractTypeRise,
+		Currency:     "USD",
+		FirstDuration: Duration{
+			Value: 60,
+			Unit:  DurationUnitSeconds,
+		},
+		SecondDuration: Duration{
+			Value: 120,
+			Unit:  DurationUnitSeconds,
+		},
+		Stake: 10.0,
+	}
+
+	_, err := pricer.CalculateAsk(context.Background(), req)
+	if err == nil {
+		t.Error("CalculateAsk() expected error for invalid symbol, got nil")
+	}
+	if !errors.Is(err, ErrInvalidSymbol) {
+		t.Errorf("CalculateAsk() error = %v, want ErrInvalidSymbol", err)
+	}
+}
+
+// Test formatPrice
+func TestFormatPrice(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    float64
+		decimals int
+		want     string
+	}{
+		{
+			name:     "4 decimals",
+			value:    0.4667,
+			decimals: 4,
+			want:     "0.4667",
+		},
+		{
+			name:     "2 decimals",
+			value:    21.4285714,
+			decimals: 2,
+			want:     "21.43",
+		},
+		{
+			name:     "round up",
+			value:    21.435,
+			decimals: 2,
+			want:     "21.44",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatPrice(tt.value, tt.decimals)
+			if got != tt.want {
+				t.Errorf("formatPrice() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

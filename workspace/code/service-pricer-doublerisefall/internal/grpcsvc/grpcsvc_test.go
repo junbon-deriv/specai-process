@@ -2,314 +2,250 @@ package grpcsvc
 
 import (
 	"context"
-	"errors"
-	"log/slog"
-	"os"
 	"testing"
 
+	pb "github.com/regentmarkets/service-pricer-doublerisefall/api/proto/doublerisefall/v1"
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/pricer"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// MockPricer mocks the pricer.Pricer for testing
-type MockPricer struct {
-	mock.Mock
-}
-
-func (m *MockPricer) CalculateAsk(ctx context.Context, req *pricer.AskRequest) (*pricer.AskResult, error) {
-	args := m.Called(ctx, req)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*pricer.AskResult), args.Error(1)
-}
-
-func (m *MockPricer) CalculateBid(ctx context.Context, req *pricer.BidRequest) (*pricer.BidResult, error) {
-	args := m.Called(ctx, req)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*pricer.BidResult), args.Error(1)
-}
-
-// MockContractValidator mocks the contract validator
-type MockContractValidator struct {
-	mock.Mock
-}
-
-func (m *MockContractValidator) ValidateAskRequest(ctx context.Context, req *pricer.AskRequest) error {
-	args := m.Called(ctx, req)
-	return args.Error(0)
-}
-
-func (m *MockContractValidator) ValidateBidRequest(ctx context.Context, req *pricer.BidRequest) error {
-	args := m.Called(ctx, req)
-	return args.Error(0)
-}
-
-func (m *MockContractValidator) ParseDuration(s string) (pricer.Duration, error) {
-	args := m.Called(s)
-	return args.Get(0).(pricer.Duration), args.Error(1)
-}
-
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-}
-
-// TC-DF-G3V: Map validation error to INVALID_ARGUMENT
-func TestMapError_InvalidSymbol(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrInvalidSymbol)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.InvalidArgument, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-S1K")
-}
-
-func TestMapError_SymbolDisabled(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrSymbolDisabled)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.FailedPrecondition, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-S2D")
-}
-
-func TestMapError_InvalidDuration(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrInvalidDuration)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.InvalidArgument, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-D1N")
-}
-
-func TestMapError_InvalidStake(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrInvalidStake)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.InvalidArgument, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-K1M")
-}
-
-func TestMapError_PayoutExceeded(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrPayoutExceeded)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.InvalidArgument, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-P1X")
-}
-
-func TestMapError_MissingStartTime(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrMissingStartTime)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.InvalidArgument, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-R1S")
-}
-
-func TestMapError_MissingPayout(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrMissingPayout)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.InvalidArgument, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-R2P")
-}
-
-func TestMapError_MissingEntryTick(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrMissingEntryTick)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.FailedPrecondition, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-E1M")
-}
-
-// TC-DF-G4W: Map feed error to UNAVAILABLE
-func TestMapError_MarketDataUnavailable(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(pricer.ErrMarketDataUnavailable)
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.Unavailable, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-M1E")
-}
-
-func TestMapError_DurationOrderViolation(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(errors.New("second_duration must be greater than first_duration"))
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.InvalidArgument, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-D2O")
-}
-
-func TestMapError_DurationGapTooSmall(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(errors.New("duration gap must be at least 10 seconds"))
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.InvalidArgument, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-D3G")
-}
-
-func TestMapError_InternalError(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
-	err := s.mapError(errors.New("some unknown error"))
-
-	st, ok := status.FromError(err)
-	assert.True(t, ok)
-	assert.Equal(t, codes.Internal, st.Code())
-	assert.Contains(t, st.Message(), "ERR-DF-I1X")
-}
-
-// Test proto conversion
-func TestProtoToContractType(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
+// Test mapProtoContractType
+func TestMapProtoContractType(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    int
-		expected pricer.ContractType
+		name  string
+		input pb.ContractType
+		want  pricer.ContractType
 	}{
 		{
-			name:     "rise",
-			input:    1, // CONTRACT_TYPE_RISE
-			expected: pricer.ContractTypeRise,
+			name:  "RISE",
+			input: pb.ContractType_CONTRACT_TYPE_RISE,
+			want:  pricer.ContractTypeRise,
 		},
 		{
-			name:     "fall",
-			input:    2, // CONTRACT_TYPE_FALL
-			expected: pricer.ContractTypeFall,
+			name:  "FALL",
+			input: pb.ContractType_CONTRACT_TYPE_FALL,
+			want:  pricer.ContractTypeFall,
 		},
 		{
-			name:     "unspecified",
-			input:    0, // CONTRACT_TYPE_UNSPECIFIED
-			expected: pricer.ContractTypeUnspecified,
+			name:  "UNSPECIFIED",
+			input: pb.ContractType_CONTRACT_TYPE_UNSPECIFIED,
+			want:  pricer.ContractTypeUnspecified,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Note: Actual test would require generated proto types
-			_ = s
-			_ = tt
+			got := mapProtoContractType(tt.input)
+			if got != tt.want {
+				t.Errorf("mapProtoContractType() = %v, want %v", got, tt.want)
+			}
 		})
 	}
 }
 
-// Test askResultToProto conversion
-func TestAskResultToProto(t *testing.T) {
-	s := &Service{logger: testLogger()}
+// Test mapDomainErrorToGRPC
+func TestMapDomainErrorToGRPC(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantCode codes.Code
+	}{
+		{
+			name:     "ErrInvalidSymbol",
+			err:      pricer.ErrInvalidSymbol,
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "ErrInvalidDuration",
+			err:      pricer.ErrInvalidDuration,
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "ErrDurationOrder",
+			err:      pricer.ErrDurationOrder,
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "ErrDurationGap",
+			err:      pricer.ErrDurationGap,
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "ErrInvalidStake",
+			err:      pricer.ErrInvalidStake,
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "ErrPayoutExceeded",
+			err:      pricer.ErrPayoutExceeded,
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "ErrSymbolDisabled",
+			err:      pricer.ErrSymbolDisabled,
+			wantCode: codes.FailedPrecondition,
+		},
+		{
+			name:     "ErrMissingEntryTick",
+			err:      pricer.ErrMissingEntryTick,
+			wantCode: codes.FailedPrecondition,
+		},
+		{
+			name:     "ErrMarketDataUnavailable",
+			err:      pricer.ErrMarketDataUnavailable,
+			wantCode: codes.Unavailable,
+		},
+		{
+			name:     "ErrStreamDisconnected",
+			err:      pricer.ErrStreamDisconnected,
+			wantCode: codes.Unavailable,
+		},
+		{
+			name:     "ErrInternal",
+			err:      pricer.ErrInternal,
+			wantCode: codes.Internal,
+		},
+	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			grpcErr := mapDomainErrorToGRPC(tt.err)
+			st, ok := status.FromError(grpcErr)
+			if !ok {
+				t.Fatal("mapDomainErrorToGRPC() did not return a gRPC status error")
+			}
+			if st.Code() != tt.wantCode {
+				t.Errorf("mapDomainErrorToGRPC() code = %v, want %v", st.Code(), tt.wantCode)
+			}
+		})
+	}
+}
+
+// Test mapAskResultToProto
+func TestMapAskResultToProto(t *testing.T) {
 	result := &pricer.AskResult{
-		AskPrice:        "10.00",
+		AskPrice:        "0.4667",
 		Currency:        "USD",
-		CurrentSpot:     "1234.56",
-		CurrentSpotTime: 1704067200,
-		Payout:          "25.00",
+		CurrentSpot:     "1234.5678",
+		CurrentSpotTime: 1736930731,
+		Payout:          "21.43",
 		MaxPayout:       "1000.00",
 		MinStake:        "1.00",
 	}
 
-	response := s.askResultToProto(result)
+	proto := mapAskResultToProto(result)
 
-	assert.Equal(t, "10.00", response.GetAskPrice())
-	assert.Equal(t, "USD", response.GetCurrency())
-	assert.Equal(t, "1234.56", response.GetCurrentSpot())
-	assert.Equal(t, int64(1704067200), response.GetCurrentSpotTime())
-	assert.Equal(t, "25.00", response.GetPayout())
-	assert.Equal(t, "1000.00", response.GetLimits().GetMaxPayout())
-	assert.Equal(t, "1.00", response.GetLimits().GetMinStake())
+	if proto.AskPrice != result.AskPrice {
+		t.Errorf("AskPrice = %v, want %v", proto.AskPrice, result.AskPrice)
+	}
+	if proto.Currency != result.Currency {
+		t.Errorf("Currency = %v, want %v", proto.Currency, result.Currency)
+	}
+	if proto.CurrentSpot != result.CurrentSpot {
+		t.Errorf("CurrentSpot = %v, want %v", proto.CurrentSpot, result.CurrentSpot)
+	}
+	if proto.CurrentSpotTime != result.CurrentSpotTime {
+		t.Errorf("CurrentSpotTime = %v, want %v", proto.CurrentSpotTime, result.CurrentSpotTime)
+	}
+	if proto.Payout != result.Payout {
+		t.Errorf("Payout = %v, want %v", proto.Payout, result.Payout)
+	}
+	if proto.Limits == nil {
+		t.Fatal("Limits is nil")
+	}
+	if proto.Limits.MaxPayout != result.MaxPayout {
+		t.Errorf("MaxPayout = %v, want %v", proto.Limits.MaxPayout, result.MaxPayout)
+	}
+	if proto.Limits.MinStake != result.MinStake {
+		t.Errorf("MinStake = %v, want %v", proto.Limits.MinStake, result.MinStake)
+	}
 }
 
-// Test bidResultToProto conversion
-func TestBidResultToProto(t *testing.T) {
-	s := &Service{logger: testLogger()}
-
+// Test mapBidResultToProto
+func TestMapBidResultToProto(t *testing.T) {
 	result := &pricer.BidResult{
-		BidPrice:        "25.00",
+		BidPrice:        "27.85",
 		IsExpired:       true,
-		CurrentSpot:     "1234.56",
-		CurrentSpotTime: 1704067200,
-		EntrySpot:       "1234.00",
-		EntrySpotTime:   1704067100,
-		ExitSpot:        "1235.00",
-		ExitSpotTime:    1704067160,
-		Barrier:         "1234.00",
-		StartTime:       1704067100,
-		ExpiryTime:      1704067160,
+		CurrentSpot:     "1235.1234",
+		CurrentSpotTime: 1736930731,
+		EntrySpot:       "1234.5678",
+		EntrySpotTime:   1736930601,
+		ExitSpot:        "1235.1234",
+		ExitSpotTime:    1736930720,
+		Barrier:         "1234.5678",
+		StartTime:       1736930600,
+		ExpiryTime:      1736930720,
+		EvaluationTime:  1736930660,
 		Currency:        "USD",
-		EvaluationTime:  1704067130,
 	}
 
-	response := s.bidResultToProto(result)
+	proto := mapBidResultToProto(result)
 
-	assert.Equal(t, "25.00", response.GetBidPrice())
-	assert.True(t, response.GetIsExpired())
-	assert.Equal(t, "1234.56", response.GetCurrentSpot())
-	assert.Equal(t, int64(1704067200), response.GetCurrentSpotTime())
-	assert.Equal(t, "1234.00", response.GetEntrySpot())
-	assert.Equal(t, int64(1704067100), response.GetEntrySpotTime())
-	assert.Equal(t, "1235.00", response.GetExitSpot())
-	assert.Equal(t, int64(1704067160), response.GetExitSpotTime())
-	assert.Equal(t, "1234.00", response.GetBarrier())
-	assert.Equal(t, int64(1704067100), response.GetStartTime())
-	assert.Equal(t, int64(1704067160), response.GetExpiryTime())
-	assert.Equal(t, "USD", response.GetCurrency())
-	assert.Equal(t, int64(1704067130), response.GetEvaluationTime())
+	if proto.BidPrice != result.BidPrice {
+		t.Errorf("BidPrice = %v, want %v", proto.BidPrice, result.BidPrice)
+	}
+	if proto.IsExpired != result.IsExpired {
+		t.Errorf("IsExpired = %v, want %v", proto.IsExpired, result.IsExpired)
+	}
+	if proto.CurrentSpot != result.CurrentSpot {
+		t.Errorf("CurrentSpot = %v, want %v", proto.CurrentSpot, result.CurrentSpot)
+	}
+	if proto.Currency != result.Currency {
+		t.Errorf("Currency = %v, want %v", proto.Currency, result.Currency)
+	}
 }
 
-// Test contains helper function
-func TestContains(t *testing.T) {
-	tests := []struct {
-		s      string
-		substr string
-		want   bool
-	}{
-		{"hello world", "world", true},
-		{"hello world", "foo", false},
-		{"must be greater than", "greater than", true},
-		{"duration gap must be at least 10 seconds", "10 seconds", true},
-		{"", "", true},
-		{"abc", "", true},
-		{"", "abc", false},
-	}
+// MockPricer for testing gRPC handlers
+type MockPricer struct {
+	askResult *pricer.AskResult
+	bidResult *pricer.BidResult
+	err       error
+}
 
-	for _, tt := range tests {
-		t.Run(tt.s+"_"+tt.substr, func(t *testing.T) {
-			got := contains(tt.s, tt.substr)
-			assert.Equal(t, tt.want, got)
-		})
+func (m *MockPricer) CalculateAsk(ctx context.Context, req *pricer.AskRequest) (*pricer.AskResult, error) {
+	if m.err != nil {
+		return nil, m.err
 	}
+	return m.askResult, nil
+}
+
+func (m *MockPricer) CalculateBid(ctx context.Context, req *pricer.BidRequest) (*pricer.BidResult, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.bidResult, nil
+}
+
+func (m *MockPricer) StreamAsk(ctx context.Context, req *pricer.AskRequest) (<-chan *pricer.AskResult, <-chan error) {
+	resultCh := make(chan *pricer.AskResult, 1)
+	errCh := make(chan error, 1)
+	if m.err != nil {
+		errCh <- m.err
+	} else if m.askResult != nil {
+		resultCh <- m.askResult
+	}
+	close(resultCh)
+	close(errCh)
+	return resultCh, errCh
+}
+
+func (m *MockPricer) StreamBid(ctx context.Context, req *pricer.BidRequest) (<-chan *pricer.BidResult, <-chan error) {
+	resultCh := make(chan *pricer.BidResult, 1)
+	errCh := make(chan error, 1)
+	if m.err != nil {
+		errCh <- m.err
+	} else if m.bidResult != nil {
+		resultCh <- m.bidResult
+	}
+	close(resultCh)
+	close(errCh)
+	return resultCh, errCh
+}
+
+// MockValidator for testing
+type MockValidator struct{}
+
+func (m *MockValidator) ParseDuration(s string) (pricer.Duration, error) {
+	return pricer.Duration{Value: 60, Unit: pricer.DurationUnitSeconds}, nil
 }

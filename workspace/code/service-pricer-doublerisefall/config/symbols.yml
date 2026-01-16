@@ -1,31 +1,32 @@
+# Symbol configuration for Double Rise/Fall pricing service
 symbols:
   R_10:
-    symbol: R_10
-    commission_rate: 0.05
+    commission: 0.05
     max_payout: 1000.00
     min_stake: 1.00
     enabled: true
   R_25:
-    symbol: R_25
-    commission_rate: 0.05
+    commission: 0.05
     max_payout: 1000.00
     min_stake: 1.00
     enabled: true
   R_50:
-    symbol: R_50
-    commission_rate: 0.05
+    commission: 0.05
     max_payout: 1000.00
     min_stake: 1.00
     enabled: true
   R_75:
-    symbol: R_75
-    commission_rate: 0.05
+    commission: 0.05
     max_payout: 1000.00
     min_stake: 1.00
     enabled: true
   R_100:
-    symbol: R_100
-    commission_rate: 0.05
+    commission: 0.05
     max_payout: 1000.00
     min_stake: 1.00
     enabled: true
+
+defaults:
+  commission: 0.05
+  max_payout: 1000.00
+  min_stake: 1.00

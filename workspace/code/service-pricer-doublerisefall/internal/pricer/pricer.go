@@ -1,3 +1,4 @@
+// Package pricer implements the core pricing logic for Double Rise/Fall contracts.
 package pricer
 
 import (
@@ -9,78 +10,27 @@ import (
 	"time"
 )
 
+// Domain errors
 var (
-	// ErrInvalidSymbol indicates the symbol is not supported
-	ErrInvalidSymbol = errors.New("invalid symbol")
-	// ErrSymbolDisabled indicates the symbol is disabled
-	ErrSymbolDisabled = errors.New("symbol disabled")
-	// ErrInvalidDuration indicates duration format is invalid
-	ErrInvalidDuration = errors.New("invalid duration format")
-	// ErrInvalidStake indicates stake is invalid
-	ErrInvalidStake = errors.New("invalid stake")
-	// ErrPayoutExceeded indicates payout exceeds maximum
-	ErrPayoutExceeded = errors.New("payout exceeds maximum")
-	// ErrMissingStartTime indicates start_time is required but missing
-	ErrMissingStartTime = errors.New("missing start_time")
-	// ErrMissingPayout indicates payout is required but missing
-	ErrMissingPayout = errors.New("missing payout")
-	// ErrMissingEntryTick indicates entry tick not found
-	ErrMissingEntryTick = errors.New("missing entry tick")
-	// ErrMarketDataUnavailable indicates market data service is unavailable
+	ErrInvalidSymbol         = errors.New("invalid symbol")
+	ErrInvalidDuration       = errors.New("invalid duration format")
+	ErrDurationOrder         = errors.New("duration order invalid: second duration must be greater than first")
+	ErrDurationGap           = errors.New("duration gap invalid: minimum gap not met")
+	ErrInvalidStake          = errors.New("stake below minimum")
+	ErrPayoutExceeded        = errors.New("payout exceeds maximum")
+	ErrPricingTimeFuture     = errors.New("pricing time cannot be in the future")
+	ErrMissingStartTime      = errors.New("start_time required for bid requests")
+	ErrMissingPayout         = errors.New("payout required for bid requests")
+	ErrInvalidContractType   = errors.New("invalid contract type")
+	ErrInvalidCurrency       = errors.New("invalid currency")
+	ErrSymbolDisabled        = errors.New("symbol is disabled")
+	ErrMissingEntryTick      = errors.New("missing entry tick")
 	ErrMarketDataUnavailable = errors.New("market data unavailable")
+	ErrStreamDisconnected    = errors.New("stream disconnected")
+	ErrInternal              = errors.New("internal error")
 )
 
-// Tick represents a market data point.
-type Tick struct {
-	Symbol string
-	Time   int64  // Unix epoch seconds
-	Quote  string // Price as string to preserve precision
-}
-
-// SymbolConfig contains symbol-specific configuration.
-type SymbolConfig struct {
-	Symbol         string
-	CommissionRate float64
-	MaxPayout      float64
-	MinStake       float64
-	Enabled        bool
-}
-
-// Duration represents a parsed duration.
-type Duration struct {
-	Value       int64
-	Unit        string // "s", "m", "h", "d", "t"
-	IsTickBased bool
-}
-
-// ToSeconds converts time-based duration to seconds.
-func (d Duration) ToSeconds() int64 {
-	if d.IsTickBased {
-		return 0
-	}
-	switch d.Unit {
-	case "s":
-		return d.Value
-	case "m":
-		return d.Value * 60
-	case "h":
-		return d.Value * 3600
-	case "d":
-		return d.Value * 86400
-	default:
-		return 0
-	}
-}
-
-// ToTicks returns tick count for tick-based durations.
-func (d Duration) ToTicks() int64 {
-	if d.IsTickBased {
-		return d.Value
-	}
-	return 0
-}
-
-// ContractType represents the contract direction.
+// ContractType represents RISE or FALL.
 type ContractType int
 
 const (
@@ -89,18 +39,69 @@ const (
 	ContractTypeFall
 )
 
-// AskRequest contains parameters for calculating ask price.
+// Duration represents a parsed duration with unit discriminator.
+type Duration struct {
+	Value int64
+	Unit  DurationUnit
+}
+
+// DurationUnit discriminates between time and tick-based durations.
+type DurationUnit string
+
+const (
+	DurationUnitSeconds DurationUnit = "s"
+	DurationUnitMinutes DurationUnit = "m"
+	DurationUnitHours   DurationUnit = "h"
+	DurationUnitDays    DurationUnit = "d"
+	DurationUnitTicks   DurationUnit = "t"
+)
+
+// ToSeconds converts a time-based duration to seconds.
+func (d Duration) ToSeconds() (int64, error) {
+	switch d.Unit {
+	case DurationUnitSeconds:
+		return d.Value, nil
+	case DurationUnitMinutes:
+		return d.Value * 60, nil
+	case DurationUnitHours:
+		return d.Value * 3600, nil
+	case DurationUnitDays:
+		return d.Value * 86400, nil
+	case DurationUnitTicks:
+		return 0, errors.New("tick duration cannot be converted to seconds")
+	default:
+		return 0, ErrInvalidDuration
+	}
+}
+
+// SymbolConfig contains per-symbol configuration.
+type SymbolConfig struct {
+	Symbol     string
+	Commission float64
+	MaxPayout  float64
+	MinStake   float64
+	Enabled    bool
+}
+
+// Tick represents a market data tick.
+type Tick struct {
+	Symbol string
+	Time   int64
+	Quote  string
+}
+
+// AskRequest contains parameters for ask price calculation.
 type AskRequest struct {
 	Symbol         string
 	ContractType   ContractType
 	Currency       string
-	FirstDuration  string
-	SecondDuration string
-	Stake          string
-	PricingTime    int64 // 0 means use current time
+	FirstDuration  Duration
+	SecondDuration Duration
+	Stake          float64
+	PricingTime    int64 // Optional, defaults to now
 }
 
-// AskResult contains the calculated ask price and details.
+// AskResult contains the calculated ask price and metadata.
 type AskResult struct {
 	AskPrice        string
 	Currency        string
@@ -111,20 +112,20 @@ type AskResult struct {
 	MinStake        string
 }
 
-// BidRequest contains parameters for evaluating bid price.
+// BidRequest contains parameters for bid price calculation.
 type BidRequest struct {
 	Symbol         string
 	ContractType   ContractType
 	Currency       string
-	FirstDuration  string
-	SecondDuration string
+	FirstDuration  Duration
+	SecondDuration Duration
 	StartTime      int64
-	Stake          string
-	Payout         string
-	PricingTime    int64 // 0 means use current time
+	Stake          float64
+	Payout         float64
+	PricingTime    int64
 }
 
-// BidResult contains the evaluated bid price and details.
+// BidResult contains the calculated bid price and contract state.
 type BidResult struct {
 	BidPrice        string
 	IsExpired       bool
@@ -137,625 +138,581 @@ type BidResult struct {
 	Barrier         string
 	StartTime       int64
 	ExpiryTime      int64
-	Currency        string
 	EvaluationTime  int64
+	Currency        string
 }
 
-// Subscription represents a tick subscription.
-type Subscription struct {
-	C   <-chan *Tick
-	Err error
-}
-
-// AskSubscription provides a stream of ask price updates.
-type AskSubscription struct {
-	C      <-chan *AskResult
-	Err    error
-	cancel context.CancelFunc
-}
-
-// Close closes the subscription and releases resources.
-func (s *AskSubscription) Close() {
-	if s.cancel != nil {
-		s.cancel()
-	}
-}
-
-// BidSubscription provides a stream of bid price updates.
-type BidSubscription struct {
-	C      <-chan *BidResult
-	Err    error
-	cancel context.CancelFunc
-}
-
-// Close closes the subscription and releases resources.
-func (s *BidSubscription) Close() {
-	if s.cancel != nil {
-		s.cancel()
-	}
-}
-
-// ConfigProvider provides access to symbol configuration.
+// ConfigProvider provides symbol configuration.
 type ConfigProvider interface {
 	GetSymbolConfig(symbol string) (*SymbolConfig, error)
 }
 
-// FeedProvider provides access to market data.
+// FeedProvider provides market data access.
 type FeedProvider interface {
 	GetTickForEpoch(ctx context.Context, symbol string, epoch int64) (*Tick, bool, error)
 	GetTicksFromLimit(ctx context.Context, symbol string, start int64, limit int64) ([]*Tick, bool, error)
-	Subscribe(ctx context.Context, symbol string, start int64) *Subscription
-	Close() error
+	Subscribe(ctx context.Context, symbol string, start int64) Subscription
+}
+
+// Subscription represents a real-time tick subscription.
+type Subscription interface {
+	C() <-chan *Tick
+	Err() error
+	Close()
 }
 
 // ContractValidator validates contract parameters.
 type ContractValidator interface {
-	ValidateAskRequest(ctx context.Context, req *AskRequest) error
-	ValidateBidRequest(ctx context.Context, req *BidRequest) error
 	ParseDuration(s string) (Duration, error)
+	ValidateAskRequest(req *AskRequest, config *SymbolConfig) error
+	ValidateBidRequest(req *BidRequest, config *SymbolConfig) error
 }
 
 // Pricer calculates ask and bid prices for Double Rise/Fall contracts.
 type Pricer struct {
-	config   ConfigProvider
-	feed     FeedProvider
-	contract ContractValidator
+	config    ConfigProvider
+	feed      FeedProvider
+	validator ContractValidator
 }
 
-// New creates a new Pricer.
-func New(config ConfigProvider, feed FeedProvider, contract ContractValidator) *Pricer {
+// NewPricer creates a new pricer with the given dependencies.
+func NewPricer(config ConfigProvider, feed FeedProvider, validator ContractValidator) *Pricer {
 	return &Pricer{
-		config:   config,
-		feed:     feed,
-		contract: contract,
+		config:    config,
+		feed:      feed,
+		validator: validator,
 	}
 }
 
-// CalculateAsk computes the ask price (payout) for a contract.
+// CalculateAsk computes the ask price and payout for a contract.
 func (p *Pricer) CalculateAsk(ctx context.Context, req *AskRequest) (*AskResult, error) {
-	// Validate request
-	if err := p.contract.ValidateAskRequest(ctx, req); err != nil {
-		return nil, err
-	}
-
-	// Get symbol configuration (GetSymbolConfig already checks if enabled)
+	// Get symbol configuration
 	cfg, err := p.config.GetSymbolConfig(req.Symbol)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse durations
-	d1, err := p.contract.ParseDuration(req.FirstDuration)
-	if err != nil {
-		return nil, fmt.Errorf("first_duration: %w", err)
+	// Validate request
+	if err := p.validator.ValidateAskRequest(req, cfg); err != nil {
+		return nil, err
 	}
 
-	d2, err := p.contract.ParseDuration(req.SecondDuration)
-	if err != nil {
-		return nil, fmt.Errorf("second_duration: %w", err)
-	}
-
-	// Get pricing time
+	// Determine pricing time
 	pricingTime := req.PricingTime
 	if pricingTime == 0 {
-		pricingTime = getCurrentTime()
+		pricingTime = time.Now().Unix()
 	}
 
 	// Get current spot price
 	tick, _, err := p.feed.GetTickForEpoch(ctx, req.Symbol, pricingTime)
 	if err != nil {
-		return nil, fmt.Errorf("get current tick: %w", ErrMarketDataUnavailable)
+		return nil, fmt.Errorf("%w: %v", ErrMarketDataUnavailable, err)
 	}
 	if tick == nil {
-		return nil, ErrMarketDataUnavailable
+		return nil, ErrMissingEntryTick
 	}
 
-	// Calculate fair probability using arcsin correlation formula
-	fairProb := p.calculateFairProbability(d1, d2)
+	// Calculate durations in seconds based on duration type
+	var t1Seconds, t2Seconds int64
 
-	// Apply commission markup
-	clientPrice := fairProb + cfg.CommissionRate
-
-	// Parse stake
-	stake, err := strconv.ParseFloat(req.Stake, 64)
-	if err != nil {
-		return nil, ErrInvalidStake
+	if req.FirstDuration.Unit == DurationUnitTicks {
+		// Tick-based contract: retrieve actual ticks and calculate time span
+		t1Seconds, t2Seconds, err = p.calculateTickBasedDurations(ctx, req.Symbol, pricingTime, req.FirstDuration, req.SecondDuration)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Time-based contract: convert directly to seconds
+		t1Seconds, err = req.FirstDuration.ToSeconds()
+		if err != nil {
+			return nil, err
+		}
+		t2Seconds, err = req.SecondDuration.ToSeconds()
+		if err != nil {
+			return nil, err
+		}
 	}
+
+	// Calculate fair probability
+	pFair := calculateFairProbability(t1Seconds, t2Seconds)
+
+	// Apply commission
+	pClient := applyCommission(pFair, cfg.Commission)
 
 	// Calculate payout
-	payout := stake / clientPrice
+	payout := calculatePayout(req.Stake, pClient)
 
-	// Check payout limits
+	// Validate payout doesn't exceed maximum
 	if payout > cfg.MaxPayout {
 		return nil, ErrPayoutExceeded
 	}
 
 	return &AskResult{
-		AskPrice:        req.Stake, // Premium equals stake
+		AskPrice:        formatPrice(pClient, 4),
 		Currency:        req.Currency,
 		CurrentSpot:     tick.Quote,
 		CurrentSpotTime: tick.Time,
-		Payout:          fmt.Sprintf("%.2f", payout),
-		MaxPayout:       fmt.Sprintf("%.2f", cfg.MaxPayout),
-		MinStake:        fmt.Sprintf("%.2f", cfg.MinStake),
+		Payout:          formatPrice(payout, 2),
+		MaxPayout:       formatPrice(cfg.MaxPayout, 2),
+		MinStake:        formatPrice(cfg.MinStake, 2),
 	}, nil
 }
 
-// CalculateBid evaluates the bid price for an active contract.
+// calculateTickBasedDurations retrieves ticks and calculates actual time durations for tick-based contracts.
+func (p *Pricer) calculateTickBasedDurations(ctx context.Context, symbol string, startTime int64, firstDuration, secondDuration Duration) (int64, int64, error) {
+	// Get ticks for first duration (t1)
+	ticksT1, _, err := p.feed.GetTicksFromLimit(ctx, symbol, startTime, firstDuration.Value)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: failed to get ticks for t1", ErrMarketDataUnavailable)
+	}
+	if int64(len(ticksT1)) < firstDuration.Value {
+		return 0, 0, fmt.Errorf("%w: insufficient ticks for t1", ErrMissingEntryTick)
+	}
+
+	// Get ticks for second duration (t2)
+	ticksT2, _, err := p.feed.GetTicksFromLimit(ctx, symbol, startTime, secondDuration.Value)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: failed to get ticks for t2", ErrMarketDataUnavailable)
+	}
+	if int64(len(ticksT2)) < secondDuration.Value {
+		return 0, 0, fmt.Errorf("%w: insufficient ticks for t2", ErrMissingEntryTick)
+	}
+
+	// Calculate actual time spans from tick timestamps
+	// t1 time = time from start tick to Nth tick
+	t1Seconds := ticksT1[len(ticksT1)-1].Time - startTime
+
+	// t2 time = time from start tick to Mth tick
+	t2Seconds := ticksT2[len(ticksT2)-1].Time - startTime
+
+	return t1Seconds, t2Seconds, nil
+}
+
+// CalculateBid computes the bid price for an active contract.
 func (p *Pricer) CalculateBid(ctx context.Context, req *BidRequest) (*BidResult, error) {
+	// Get symbol configuration
+	cfg, err := p.config.GetSymbolConfig(req.Symbol)
+	if err != nil {
+		return nil, err
+	}
+
 	// Validate request
-	if err := p.contract.ValidateBidRequest(ctx, req); err != nil {
+	if err := p.validator.ValidateBidRequest(req, cfg); err != nil {
 		return nil, err
 	}
 
-	// Get symbol configuration (GetSymbolConfig already checks if enabled)
-	_, err := p.config.GetSymbolConfig(req.Symbol)
-	if err != nil {
-		return nil, err
+	// Determine pricing time
+	pricingTime := req.PricingTime
+	if pricingTime == 0 {
+		pricingTime = time.Now().Unix()
 	}
 
-	// Parse durations
-	d1, err := p.contract.ParseDuration(req.FirstDuration)
+	// Get entry tick (barrier)
+	entryTick, _, err := p.feed.GetTickForEpoch(ctx, req.Symbol, req.StartTime)
 	if err != nil {
-		return nil, fmt.Errorf("first_duration: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrMarketDataUnavailable, err)
 	}
-
-	d2, err := p.contract.ParseDuration(req.SecondDuration)
-	if err != nil {
-		return nil, fmt.Errorf("second_duration: %w", err)
-	}
-
-	// Get entry tick (barrier) - first tick AFTER start_time
-	// Using start_time + 1 to ensure we get a tick after, not at start_time
-	entryTicks, _, err := p.feed.GetTicksFromLimit(ctx, req.Symbol, req.StartTime+1, 1)
-	if err != nil {
-		return nil, fmt.Errorf("get entry tick: %w", ErrMarketDataUnavailable)
-	}
-	if len(entryTicks) == 0 {
+	if entryTick == nil {
 		return nil, ErrMissingEntryTick
 	}
-	entryTick := entryTicks[0]
 
 	barrier, err := strconv.ParseFloat(entryTick.Quote, 64)
 	if err != nil {
-		return nil, fmt.Errorf("parse barrier: %w", err)
+		return nil, fmt.Errorf("%w: invalid entry spot", ErrInternal)
 	}
 
-	// Get pricing time
-	pricingTime := req.PricingTime
-	if pricingTime == 0 {
-		pricingTime = getCurrentTime()
-	}
+	// Calculate evaluation and expiry times based on duration type
+	var evaluationTime, expiryTime int64
 
-	// Determine evaluation time calculations based on duration type
-	var t1, t2 int64
-
-	if d1.IsTickBased {
-		// For tick-based, we'll calculate times from the actual ticks
-		// Fetch ticks first to determine evaluation times
-		limit := d2.ToTicks() + 1 // +1 because entry tick is tick 0
-		ticks, _, err := p.feed.GetTicksFromLimit(ctx, req.Symbol, req.StartTime+1, limit)
+	if req.FirstDuration.Unit == DurationUnitTicks {
+		// Tick-based contract: retrieve actual ticks to determine times
+		ticksT1, _, err := p.feed.GetTicksFromLimit(ctx, req.Symbol, req.StartTime, req.FirstDuration.Value)
 		if err != nil {
-			return nil, fmt.Errorf("get ticks: %w", ErrMarketDataUnavailable)
+			return nil, fmt.Errorf("%w: failed to get ticks for t1", ErrMarketDataUnavailable)
 		}
-		if int64(len(ticks)) < limit {
-			return nil, fmt.Errorf("insufficient ticks available: %w", ErrMarketDataUnavailable)
+		if int64(len(ticksT1)) < req.FirstDuration.Value {
+			return nil, fmt.Errorf("%w: insufficient ticks for t1", ErrMissingEntryTick)
 		}
+		evaluationTime = ticksT1[len(ticksT1)-1].Time
 
-		// ticks[0] is entry tick (already have this)
-		// ticks[d1.Value] is first evaluation
-		// ticks[d2.Value] is second evaluation
-		spot1 := ticks[d1.ToTicks()]
-		t1 = spot1.Time
-		spot2 := ticks[d2.ToTicks()]
-		t2 = spot2.Time
-
-		// Evaluate bid with all ticks available
-		return p.evaluateBidWithTicks(ctx, req, entryTick, spot1, spot2, barrier, t1, t2, pricingTime)
+		ticksT2, _, err := p.feed.GetTicksFromLimit(ctx, req.Symbol, req.StartTime, req.SecondDuration.Value)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to get ticks for t2", ErrMarketDataUnavailable)
+		}
+		if int64(len(ticksT2)) < req.SecondDuration.Value {
+			return nil, fmt.Errorf("%w: insufficient ticks for t2", ErrMissingEntryTick)
+		}
+		expiryTime = ticksT2[len(ticksT2)-1].Time
+	} else {
+		// Time-based contract: calculate from durations
+		t1Seconds, err := req.FirstDuration.ToSeconds()
+		if err != nil {
+			return nil, err
+		}
+		t2Seconds, err := req.SecondDuration.ToSeconds()
+		if err != nil {
+			return nil, err
+		}
+		evaluationTime = req.StartTime + t1Seconds
+		expiryTime = req.StartTime + t2Seconds
 	}
 
-	// For time-based contracts, calculate times and fetch ticks as needed
-	t1 = req.StartTime + d1.ToSeconds()
-	t2 = req.StartTime + d2.ToSeconds()
-
-	// Get spot at t1
-	spot1, _, err := p.feed.GetTickForEpoch(ctx, req.Symbol, t1)
-	if err != nil || spot1 == nil {
-		return nil, ErrMarketDataUnavailable
-	}
-
-	// Evaluate at t1 first to determine if we need t2
-	price1, err := strconv.ParseFloat(spot1.Quote, 64)
+	// Get current spot
+	currentTick, _, err := p.feed.GetTickForEpoch(ctx, req.Symbol, pricingTime)
 	if err != nil {
-		return nil, fmt.Errorf("parse spot1: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrMarketDataUnavailable, err)
 	}
-
-	t1Pass := false
-	if req.ContractType == ContractTypeRise {
-		t1Pass = price1 > barrier
-	} else {
-		t1Pass = price1 < barrier
-	}
-
-	var spot2 *Tick
-	// Only fetch spot2 if t1 passed and contract has expired
-	if t1Pass && pricingTime >= t2 {
-		spot2, _, err = p.feed.GetTickForEpoch(ctx, req.Symbol, t2)
-		if err != nil || spot2 == nil {
-			return nil, ErrMarketDataUnavailable
-		}
-	}
-
-	return p.evaluateBidWithTicks(ctx, req, entryTick, spot1, spot2, barrier, t1, t2, pricingTime)
-}
-
-// evaluateBidWithTicks evaluates bid price given all the tick data.
-func (p *Pricer) evaluateBidWithTicks(
-	ctx context.Context,
-	req *BidRequest,
-	entryTick, spot1, spot2 *Tick,
-	barrier float64,
-	t1, t2, pricingTime int64,
-) (*BidResult, error) {
-	var bidPrice string
-	var isExpired bool
-	var exitSpot string
-	var exitSpotTime int64
-
-	if pricingTime < t1 {
-		// Before first evaluation, bid is 0, not expired
-		bidPrice = "0.00"
-		isExpired = false
-	} else {
-		// Evaluate at t1
-		price1, err := strconv.ParseFloat(spot1.Quote, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse spot1: %w", err)
-		}
-
-		t1Pass := false
-		if req.ContractType == ContractTypeRise {
-			t1Pass = price1 > barrier
-		} else {
-			t1Pass = price1 < barrier
-		}
-
-		if !t1Pass {
-			// Contract fails at t1 - expires immediately
-			bidPrice = "0.00"
-			isExpired = true
-			exitSpot = spot1.Quote
-			exitSpotTime = spot1.Time
-		} else if pricingTime >= t2 {
-			// Contract reached t2, t1 passed, evaluate final result
-			if spot2 == nil {
-				return nil, fmt.Errorf("missing spot2 for expired contract")
-			}
-
-			price2, err := strconv.ParseFloat(spot2.Quote, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse spot2: %w", err)
-			}
-
-			t2Pass := false
-			if req.ContractType == ContractTypeRise {
-				t2Pass = price2 > barrier
-			} else {
-				t2Pass = price2 < barrier
-			}
-
-			if t2Pass {
-				bidPrice = req.Payout
-			} else {
-				bidPrice = "0.00"
-			}
-			isExpired = true
-			exitSpot = spot2.Quote
-			exitSpotTime = spot2.Time
-		} else {
-			// Between t1 and t2, t1 passed but not yet expired
-			bidPrice = "0.00"
-			isExpired = false
-		}
-	}
-
-	// Get current tick for response
-	currentTick, _, _ := p.feed.GetTickForEpoch(ctx, req.Symbol, pricingTime)
 	if currentTick == nil {
-		currentTick = entryTick
+		return nil, ErrMissingEntryTick
 	}
 
-	return &BidResult{
-		BidPrice:        bidPrice,
-		IsExpired:       isExpired,
-		CurrentSpot:     currentTick.Quote,
-		CurrentSpotTime: currentTick.Time,
+	result := &BidResult{
+		Currency:        req.Currency,
 		EntrySpot:       entryTick.Quote,
 		EntrySpotTime:   entryTick.Time,
-		ExitSpot:        exitSpot,
-		ExitSpotTime:    exitSpotTime,
 		Barrier:         entryTick.Quote,
 		StartTime:       req.StartTime,
-		ExpiryTime:      t2,
-		Currency:        req.Currency,
-		EvaluationTime:  t1,
-	}, nil
-}
-
-// calculateFairProbability computes fair probability using arcsin correlation formula.
-// Formula: P_fair = 1/4 + arcsin(ρ)/(2π)
-// Where: ρ = √(t₁/t₂)
-func (p *Pricer) calculateFairProbability(d1, d2 Duration) float64 {
-	var t1, t2 float64
-
-	if d1.IsTickBased {
-		t1 = float64(d1.Value)
-		t2 = float64(d2.Value)
-	} else {
-		t1 = float64(d1.ToSeconds())
-		t2 = float64(d2.ToSeconds())
+		ExpiryTime:      expiryTime,
+		EvaluationTime:  evaluationTime,
+		CurrentSpot:     currentTick.Quote,
+		CurrentSpotTime: currentTick.Time,
 	}
 
-	// Calculate correlation: ρ = √(t₁/t₂)
-	rho := math.Sqrt(t1 / t2)
+	// Check if contract has expired
+	if pricingTime >= expiryTime {
+		// Contract expired - evaluate win/loss
+		result.IsExpired = true
 
-	// Calculate fair probability: P_fair = 1/4 + arcsin(ρ)/(2π)
-	fairProb := 0.25 + math.Asin(rho)/(2*math.Pi)
-
-	return fairProb
-}
-
-// SubscribeAsk creates a subscription that emits ask price updates.
-// For tick-based contracts: emits on each tick.
-// For time-based contracts: emits on each tick OR every 5 seconds.
-func (p *Pricer) SubscribeAsk(ctx context.Context, req *AskRequest) (*AskSubscription, error) {
-	// Validate request
-	if err := p.contract.ValidateAskRequest(ctx, req); err != nil {
-		return nil, err
-	}
-
-	// Parse durations to determine if tick-based
-	d1, err := p.contract.ParseDuration(req.FirstDuration)
-	if err != nil {
-		return nil, fmt.Errorf("first_duration: %w", err)
-	}
-
-	// Create context for subscription lifecycle
-	subCtx, cancel := context.WithCancel(ctx)
-
-	// Create channel for ask results
-	askChan := make(chan *AskResult, 10)
-
-	sub := &AskSubscription{
-		C:      askChan,
-		cancel: cancel,
-	}
-
-	// Start goroutine to handle streaming
-	go func() {
-		defer close(askChan)
-		defer cancel()
-
-		// Send initial response
-		result, err := p.CalculateAsk(subCtx, req)
+		// Get t1 spot
+		t1Tick, _, err := p.feed.GetTickForEpoch(ctx, req.Symbol, evaluationTime)
 		if err != nil {
-			sub.Err = err
+			return nil, fmt.Errorf("%w: %v", ErrMarketDataUnavailable, err)
+		}
+		if t1Tick == nil {
+			return nil, ErrMissingEntryTick
+		}
+
+		spotT1, err := strconv.ParseFloat(t1Tick.Quote, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid t1 spot", ErrInternal)
+		}
+
+		// Get t2 spot (exit spot)
+		t2Tick, _, err := p.feed.GetTickForEpoch(ctx, req.Symbol, expiryTime)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrMarketDataUnavailable, err)
+		}
+		if t2Tick == nil {
+			return nil, ErrMissingEntryTick
+		}
+
+		result.ExitSpot = t2Tick.Quote
+		result.ExitSpotTime = t2Tick.Time
+
+		spotT2, err := strconv.ParseFloat(t2Tick.Quote, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid t2 spot", ErrInternal)
+		}
+
+		// Evaluate contract
+		won := evaluateContract(req.ContractType, barrier, spotT1, spotT2)
+		if won {
+			result.BidPrice = formatPrice(req.Payout, 2)
+		} else {
+			result.BidPrice = "0.00"
+		}
+	} else {
+		// Contract still active - calculate value based on current state
+		result.IsExpired = false
+		result.ExitSpot = ""
+		result.ExitSpotTime = 0
+
+		// Calculate bid price based on contract state
+		bidPrice, err := p.calculateActiveBidPrice(ctx, req, barrier, evaluationTime, expiryTime, pricingTime, currentTick)
+		if err != nil {
+			return nil, err
+		}
+		result.BidPrice = formatPrice(bidPrice, 2)
+	}
+
+	return result, nil
+}
+
+// calculateActiveBidPrice calculates the bid price for an active contract based on its current state.
+func (p *Pricer) calculateActiveBidPrice(ctx context.Context, req *BidRequest, barrier float64, evaluationTime, expiryTime, pricingTime int64, currentTick *Tick) (float64, error) {
+	currentSpot, err := strconv.ParseFloat(currentTick.Quote, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: invalid current spot", ErrInternal)
+	}
+
+	// Check if we're before or after t1 (evaluation time)
+	if pricingTime < evaluationTime {
+		// Before t1: Contract value is based on current position and probability
+		// Simplified approach: return current spot as proxy for contract value
+		// This could be enhanced with proper probability-based valuation
+		return currentSpot, nil
+	}
+
+	// After t1, before t2: Check t1 evaluation result
+	t1Tick, _, err := p.feed.GetTickForEpoch(ctx, req.Symbol, evaluationTime)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrMarketDataUnavailable, err)
+	}
+	if t1Tick == nil {
+		return 0, ErrMissingEntryTick
+	}
+
+	spotT1, err := strconv.ParseFloat(t1Tick.Quote, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: invalid t1 spot", ErrInternal)
+	}
+
+	// Evaluate t1 condition
+	var t1ConditionMet bool
+	switch req.ContractType {
+	case ContractTypeRise:
+		t1ConditionMet = spotT1 > barrier
+	case ContractTypeFall:
+		t1ConditionMet = spotT1 < barrier
+	default:
+		return 0, ErrInvalidContractType
+	}
+
+	if !t1ConditionMet {
+		// First condition failed - contract will lose, value approaches 0
+		// Return a small residual value based on remaining time
+		timeToExpiry := float64(expiryTime - pricingTime)
+		totalTime := float64(expiryTime - req.StartTime)
+		residualValue := req.Payout * 0.01 * (timeToExpiry / totalTime) // 1% residual * time factor
+		if residualValue < 0.01 {
+			return 0.01, nil // Minimum bid
+		}
+		return residualValue, nil
+	}
+
+	// First condition met, still need to meet second condition
+	// Contract has value between stake and payout based on current position and remaining time
+	var currentConditionMet bool
+	switch req.ContractType {
+	case ContractTypeRise:
+		currentConditionMet = currentSpot > barrier
+	case ContractTypeFall:
+		currentConditionMet = currentSpot < barrier
+	default:
+		return 0, ErrInvalidContractType
+	}
+
+	if currentConditionMet {
+		// Both conditions currently met - higher value
+		// Value approaches payout as we get closer to expiry
+		timeToExpiry := float64(expiryTime - pricingTime)
+		totalTime := float64(expiryTime - req.StartTime)
+		timeDecayFactor := 1.0 - (timeToExpiry / totalTime) // 0 at start, 1 at expiry
+
+		// Value ranges from stake to payout as we approach expiry
+		bidValue := req.Stake + (req.Payout-req.Stake)*timeDecayFactor*0.8 // 80% confidence factor
+		return bidValue, nil
+	}
+
+	// First condition met but second currently not met
+	// Contract has uncertain value - return stake value as it's still viable
+	return req.Stake, nil
+}
+
+// StreamAsk provides continuous ask price updates.
+func (p *Pricer) StreamAsk(ctx context.Context, req *AskRequest) (<-chan *AskResult, <-chan error) {
+	resultCh := make(chan *AskResult)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(resultCh)
+		defer close(errCh)
+
+		// Subscribe to tick updates
+		sub := p.feed.Subscribe(ctx, req.Symbol, time.Now().Unix())
+		defer sub.Close()
+
+		// Send initial price
+		result, err := p.CalculateAsk(ctx, req)
+		if err != nil {
+			errCh <- err
 			return
 		}
 		select {
-		case <-subCtx.Done():
+		case resultCh <- result:
+		case <-ctx.Done():
 			return
-		case askChan <- result:
 		}
 
-		if d1.IsTickBased {
-			// Tick-based: subscribe to feed, emit on each tick
-			feedSub := p.feed.Subscribe(subCtx, req.Symbol, time.Now().Unix())
+		// Stream updates
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 
-			for {
-				select {
-				case <-subCtx.Done():
-					return
-				case tick := <-feedSub.C:
-					if tick == nil {
-						if feedSub.Err != nil {
-							sub.Err = feedSub.Err
-						}
-						return
-					}
-					// Recalculate ask with updated market data
-					result, err := p.CalculateAsk(subCtx, req)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case tick := <-sub.C():
+				if tick != nil {
+					result, err := p.CalculateAsk(ctx, req)
 					if err != nil {
-						sub.Err = err
+						errCh <- err
 						return
 					}
 					select {
-					case <-subCtx.Done():
+					case resultCh <- result:
+					case <-ctx.Done():
 						return
-					case askChan <- result:
 					}
+				}
+			case <-ticker.C:
+				result, err := p.CalculateAsk(ctx, req)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				select {
+				case resultCh <- result:
+				case <-ctx.Done():
+					return
 				}
 			}
-		} else {
-			// Time-based: subscribe to feed AND use 5-second ticker
-			feedSub := p.feed.Subscribe(subCtx, req.Symbol, time.Now().Unix())
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
 
-			for {
-				select {
-				case <-subCtx.Done():
-					return
-				case tick := <-feedSub.C:
-					if tick == nil {
-						if feedSub.Err != nil {
-							sub.Err = feedSub.Err
-						}
-						return
-					}
-					result, err := p.CalculateAsk(subCtx, req)
-					if err != nil {
-						sub.Err = err
-						return
-					}
-					select {
-					case <-subCtx.Done():
-						return
-					case askChan <- result:
-					}
-				case <-ticker.C:
-					result, err := p.CalculateAsk(subCtx, req)
-					if err != nil {
-						sub.Err = err
-						return
-					}
-					select {
-					case <-subCtx.Done():
-						return
-					case askChan <- result:
-					}
-				}
+			if sub.Err() != nil {
+				errCh <- fmt.Errorf("%w: %v", ErrStreamDisconnected, sub.Err())
+				return
 			}
 		}
 	}()
 
-	return sub, nil
+	return resultCh, errCh
 }
 
-// SubscribeBid creates a subscription that emits bid price updates until contract expires.
-// For tick-based contracts: emits on each tick ONLY (no time-based fallback).
-// For time-based contracts: emits on each tick OR every 5 seconds.
-func (p *Pricer) SubscribeBid(ctx context.Context, req *BidRequest) (*BidSubscription, error) {
-	// Validate request
-	if err := p.contract.ValidateBidRequest(ctx, req); err != nil {
-		return nil, err
-	}
+// StreamBid provides continuous bid price updates.
+func (p *Pricer) StreamBid(ctx context.Context, req *BidRequest) (<-chan *BidResult, <-chan error) {
+	resultCh := make(chan *BidResult)
+	errCh := make(chan error, 1)
 
-	// Parse durations to determine if tick-based
-	d1, err := p.contract.ParseDuration(req.FirstDuration)
-	if err != nil {
-		return nil, fmt.Errorf("first_duration: %w", err)
-	}
-
-	// Create context for subscription lifecycle
-	subCtx, cancel := context.WithCancel(ctx)
-
-	// Create channel for bid results
-	bidChan := make(chan *BidResult, 10)
-
-	sub := &BidSubscription{
-		C:      bidChan,
-		cancel: cancel,
-	}
-
-	// Start goroutine to handle streaming
 	go func() {
-		defer close(bidChan)
-		defer cancel()
+		defer close(resultCh)
+		defer close(errCh)
 
-		// Send initial response
-		result, err := p.CalculateBid(subCtx, req)
+		// Subscribe to tick updates
+		sub := p.feed.Subscribe(ctx, req.Symbol, req.StartTime)
+		defer sub.Close()
+
+		// Send initial bid
+		result, err := p.CalculateBid(ctx, req)
 		if err != nil {
-			sub.Err = err
+			errCh <- err
 			return
 		}
 		select {
-		case <-subCtx.Done():
+		case resultCh <- result:
+		case <-ctx.Done():
 			return
-		case bidChan <- result:
 		}
 
-		// If already expired, close immediately
+		// If already expired, stop streaming
 		if result.IsExpired {
 			return
 		}
 
-		if d1.IsTickBased {
-			// Tick-based: subscribe to feed, emit on each tick ONLY
-			feedSub := p.feed.Subscribe(subCtx, req.Symbol, req.StartTime)
+		// Stream updates
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 
-			for {
-				select {
-				case <-subCtx.Done():
-					return
-				case tick := <-feedSub.C:
-					if tick == nil {
-						if feedSub.Err != nil {
-							sub.Err = feedSub.Err
-						}
-						return
-					}
-					// Recalculate bid with updated market data
-					result, err := p.CalculateBid(subCtx, req)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case tick := <-sub.C():
+				if tick != nil {
+					result, err := p.CalculateBid(ctx, req)
 					if err != nil {
-						sub.Err = err
+						errCh <- err
 						return
 					}
 					select {
-					case <-subCtx.Done():
+					case resultCh <- result:
+					case <-ctx.Done():
 						return
-					case bidChan <- result:
 					}
-					// Close if contract expired
+					// Stop streaming after expiry
 					if result.IsExpired {
 						return
 					}
+				}
+			case <-ticker.C:
+				result, err := p.CalculateBid(ctx, req)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				select {
+				case resultCh <- result:
+				case <-ctx.Done():
+					return
+				}
+				// Stop streaming after expiry
+				if result.IsExpired {
+					return
 				}
 			}
-		} else {
-			// Time-based: subscribe to feed AND use 5-second ticker
-			feedSub := p.feed.Subscribe(subCtx, req.Symbol, req.StartTime)
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
 
-			for {
-				select {
-				case <-subCtx.Done():
-					return
-				case tick := <-feedSub.C:
-					if tick == nil {
-						if feedSub.Err != nil {
-							sub.Err = feedSub.Err
-						}
-						return
-					}
-					result, err := p.CalculateBid(subCtx, req)
-					if err != nil {
-						sub.Err = err
-						return
-					}
-					select {
-					case <-subCtx.Done():
-						return
-					case bidChan <- result:
-					}
-					if result.IsExpired {
-						return
-					}
-				case <-ticker.C:
-					result, err := p.CalculateBid(subCtx, req)
-					if err != nil {
-						sub.Err = err
-						return
-					}
-					select {
-					case <-subCtx.Done():
-						return
-					case bidChan <- result:
-					}
-					if result.IsExpired {
-						return
-					}
-				}
+			if sub.Err() != nil {
+				errCh <- fmt.Errorf("%w: %v", ErrStreamDisconnected, sub.Err())
+				return
 			}
 		}
 	}()
 
-	return sub, nil
+	return resultCh, errCh
 }
 
-// getCurrentTime returns current Unix timestamp.
-// This is a separate function to make testing easier.
-func getCurrentTime() int64 {
-	return time.Now().Unix()
+// calculateFairProbability computes P_fair using bivariate normal distribution.
+// Formula: P_fair = 1/4 + arcsin(sqrt(t1/t2)) / (2π)
+func calculateFairProbability(t1Seconds, t2Seconds int64) float64 {
+	// Calculate correlation
+	rho := math.Sqrt(float64(t1Seconds) / float64(t2Seconds))
+
+	// Calculate fair probability
+	pFair := 0.25 + math.Asin(rho)/(2*math.Pi)
+
+	return pFair
+}
+
+// applyCommission adds commission to fair probability.
+// Returns client price (P_client = P_fair + commission)
+func applyCommission(pFair, commission float64) float64 {
+	return pFair + commission
+}
+
+// calculatePayout computes payout from stake and client price.
+// Formula: Payout = Stake / P_client
+func calculatePayout(stake, pClient float64) float64 {
+	if pClient <= 0 || pClient > 1 {
+		return 0
+	}
+	return stake / pClient
+}
+
+// evaluateContract determines win/loss at expiry.
+func evaluateContract(contractType ContractType, barrier, spotT1, spotT2 float64) bool {
+	switch contractType {
+	case ContractTypeRise:
+		// Win if spot > barrier at BOTH t1 AND t2
+		return spotT1 > barrier && spotT2 > barrier
+	case ContractTypeFall:
+		// Win if spot < barrier at BOTH t1 AND t2
+		return spotT1 < barrier && spotT2 < barrier
+	default:
+		return false
+	}
+}
+
+// formatPrice formats a price to the specified number of decimal places.
+func formatPrice(value float64, decimals int) string {
+	format := fmt.Sprintf("%%.%df", decimals)
+	return fmt.Sprintf(format, value)
 }

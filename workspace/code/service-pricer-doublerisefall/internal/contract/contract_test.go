@@ -1,422 +1,440 @@
 package contract
 
 import (
-	"context"
+	"errors"
 	"testing"
 
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/pricer"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
 )
 
-// MockConfigProvider mocks ConfigProvider interface for testing
+// MockConfigProvider for testing
 type MockConfigProvider struct {
-	mock.Mock
+	configs map[string]*pricer.SymbolConfig
 }
 
 func (m *MockConfigProvider) GetSymbolConfig(symbol string) (*pricer.SymbolConfig, error) {
-	args := m.Called(symbol)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	cfg, ok := m.configs[symbol]
+	if !ok {
+		return nil, pricer.ErrInvalidSymbol
 	}
-	return args.Get(0).(*pricer.SymbolConfig), args.Error(1)
+	return cfg, nil
 }
 
-func defaultConfig() *pricer.SymbolConfig {
-	return &pricer.SymbolConfig{
-		Symbol:         "R_100",
-		CommissionRate: 0.05,
-		MaxPayout:      1000.00,
-		MinStake:       1.00,
-		Enabled:        true,
-	}
-}
-
-// Test ValidateAskRequest - valid request
-func TestValidateAskRequest_Valid(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "10.00",
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.NoError(t, err)
-}
-
-// Test ValidateAskRequest - unsupported symbol
-func TestValidateAskRequest_UnsupportedSymbol(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "INVALID",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "10.00",
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, pricer.ErrInvalidSymbol)
-}
-
-// Test ValidateAskRequest - stake below minimum
-func TestValidateAskRequest_StakeBelowMinimum(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "0.50", // Below min stake of 1.00
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, pricer.ErrInvalidStake)
-}
-
-// Test ValidateAskRequest - invalid stake format
-func TestValidateAskRequest_InvalidStakeFormat(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "invalid",
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, pricer.ErrInvalidStake)
-}
-
-// Test ValidateAskRequest - mixed duration types
-func TestValidateAskRequest_MixedDurationTypes(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s", // Time-based
-		SecondDuration: "5t",  // Tick-based
-		Stake:          "10.00",
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, pricer.ErrInvalidDuration)
-}
-
-// Test ValidateAskRequest - duration order violation
-func TestValidateAskRequest_DurationOrderViolation(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "60s",
-		SecondDuration: "30s", // Second should be greater than first
-		Stake:          "10.00",
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, pricer.ErrInvalidDuration)
-}
-
-// Test ValidateAskRequest - duration gap too small (time-based)
-func TestValidateAskRequest_DurationGapTooSmall_TimeBased(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "35s", // Gap of 5s, minimum is 10s
-		Stake:          "10.00",
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, pricer.ErrInvalidDuration)
-	assert.Contains(t, err.Error(), "at least 10 seconds")
-}
-
-// Test ValidateAskRequest - duration gap too small (tick-based)
-func TestValidateAskRequest_DurationGapTooSmall_TickBased(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "3t",
-		SecondDuration: "4t", // Gap of 1 tick, minimum is 2 ticks
-		Stake:          "10.00",
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, pricer.ErrInvalidDuration)
-	assert.Contains(t, err.Error(), "at least 2 ticks")
-}
-
-// Test ValidateAskRequest - pricing time in future
-func TestValidateAskRequest_PricingTimeInFuture(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		Stake:          "10.00",
-		PricingTime:    9999999999, // Far in the future
-	}
-
-	err := v.ValidateAskRequest(ctx, req)
-
-	assert.Error(t, err)
-}
-
-// Test ValidateBidRequest - valid request
-func TestValidateBidRequest_Valid(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	req := &pricer.BidRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		StartTime:      1704067200,
-		Stake:          "10.00",
-		Payout:         "25.00",
-	}
-
-	err := v.ValidateBidRequest(ctx, req)
-
-	assert.NoError(t, err)
-}
-
-// Test ValidateBidRequest - missing start time
-func TestValidateBidRequest_MissingStartTime(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-
-	v := NewValidator(cfg)
-
-	req := &pricer.BidRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		StartTime:      0, // Missing
-		Stake:          "10.00",
-		Payout:         "25.00",
-	}
-
-	err := v.ValidateBidRequest(ctx, req)
-
-	assert.ErrorIs(t, err, pricer.ErrMissingStartTime)
-}
-
-// Test ValidateBidRequest - missing payout
-func TestValidateBidRequest_MissingPayout(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-
-	v := NewValidator(cfg)
-
-	req := &pricer.BidRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		StartTime:      1704067200,
-		Stake:          "10.00",
-		Payout:         "", // Missing
-	}
-
-	err := v.ValidateBidRequest(ctx, req)
-
-	assert.ErrorIs(t, err, pricer.ErrMissingPayout)
-}
-
-// Test ValidateBidRequest - payout exceeds maximum
-func TestValidateBidRequest_PayoutExceedsMax(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil) // MaxPayout is 1000
-
-	v := NewValidator(cfg)
-
-	req := &pricer.BidRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "30s",
-		SecondDuration: "60s",
-		StartTime:      1704067200,
-		Stake:          "10.00",
-		Payout:         "5000.00", // Exceeds 1000
-	}
-
-	err := v.ValidateBidRequest(ctx, req)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, pricer.ErrPayoutExceeded)
-}
-
-// Test ParseDuration wrapper
+// Test ParseDuration
 func TestValidator_ParseDuration(t *testing.T) {
-	cfg := &MockConfigProvider{}
-	v := NewValidator(cfg)
-
 	tests := []struct {
+		name    string
 		input   string
+		want    pricer.Duration
 		wantErr bool
 	}{
-		{"30s", false},
-		{"5m", false},
-		{"2h", false},
-		{"1d", false},
-		{"5t", false},
-		{"invalid", true},
-		{"", true},
+		{
+			name:  "parse seconds",
+			input: "30s",
+			want: pricer.Duration{
+				Value: 30,
+				Unit:  pricer.DurationUnitSeconds,
+			},
+			wantErr: false,
+		},
+		{
+			name:  "parse minutes",
+			input: "5m",
+			want: pricer.Duration{
+				Value: 5,
+				Unit:  pricer.DurationUnitMinutes,
+			},
+			wantErr: false,
+		},
+		{
+			name:  "parse hours",
+			input: "2h",
+			want: pricer.Duration{
+				Value: 2,
+				Unit:  pricer.DurationUnitHours,
+			},
+			wantErr: false,
+		},
+		{
+			name:  "parse days",
+			input: "1d",
+			want: pricer.Duration{
+				Value: 1,
+				Unit:  pricer.DurationUnitDays,
+			},
+			wantErr: false,
+		},
+		{
+			name:  "parse ticks",
+			input: "5t",
+			want: pricer.Duration{
+				Value: 5,
+				Unit:  pricer.DurationUnitTicks,
+			},
+			wantErr: false,
+		},
+		{
+			name:    "invalid format - no unit",
+			input:   "30",
+			want:    pricer.Duration{},
+			wantErr: true,
+		},
+		{
+			name:    "invalid format - invalid unit",
+			input:   "5x",
+			want:    pricer.Duration{},
+			wantErr: true,
+		},
+		{
+			name:    "invalid format - empty",
+			input:   "",
+			want:    pricer.Duration{},
+			wantErr: true,
+		},
+	}
+
+	mockConfig := &MockConfigProvider{}
+	validator := NewValidator(mockConfig)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validator.ParseDuration(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseDuration() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr {
+				if got.Value != tt.want.Value || got.Unit != tt.want.Unit {
+					t.Errorf("ParseDuration() = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// Test ValidateAskRequest
+func TestValidator_ValidateAskRequest(t *testing.T) {
+	mockConfig := &MockConfigProvider{
+		configs: map[string]*pricer.SymbolConfig{
+			"R_100": {
+				Symbol:     "R_100",
+				Commission: 0.05,
+				MaxPayout:  1000.0,
+				MinStake:   1.0,
+				Enabled:    true,
+			},
+			"R_10_DISABLED": {
+				Symbol:     "R_10_DISABLED",
+				Commission: 0.05,
+				MaxPayout:  1000.0,
+				MinStake:   1.0,
+				Enabled:    false,
+			},
+		},
+	}
+	validator := NewValidator(mockConfig)
+
+	tests := []struct {
+		name    string
+		req     *pricer.AskRequest
+		wantErr error
+	}{
+		{
+			name: "valid request",
+			req: &pricer.AskRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 120,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				Stake: 10.0,
+			},
+			wantErr: nil,
+		},
+		{
+			name: "disabled symbol",
+			req: &pricer.AskRequest{
+				Symbol:       "R_10_DISABLED",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 120,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				Stake: 10.0,
+			},
+			wantErr: pricer.ErrSymbolDisabled,
+		},
+		{
+			name: "invalid contract type",
+			req: &pricer.AskRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeUnspecified,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 120,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				Stake: 10.0,
+			},
+			wantErr: pricer.ErrInvalidContractType,
+		},
+		{
+			name: "stake below minimum",
+			req: &pricer.AskRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 120,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				Stake: 0.5,
+			},
+			wantErr: pricer.ErrInvalidStake,
+		},
+		{
+			name: "duration order invalid",
+			req: &pricer.AskRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 120,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				Stake: 10.0,
+			},
+			wantErr: pricer.ErrDurationOrder,
+		},
+		{
+			name: "duration gap too small",
+			req: &pricer.AskRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 65,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				Stake: 10.0,
+			},
+			wantErr: pricer.ErrDurationGap,
+		},
+		{
+			name: "valid tick-based",
+			req: &pricer.AskRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 5,
+					Unit:  pricer.DurationUnitTicks,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 10,
+					Unit:  pricer.DurationUnitTicks,
+				},
+				Stake: 10.0,
+			},
+			wantErr: nil,
+		},
+		{
+			name: "tick-based gap too small",
+			req: &pricer.AskRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 5,
+					Unit:  pricer.DurationUnitTicks,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 6,
+					Unit:  pricer.DurationUnitTicks,
+				},
+				Stake: 10.0,
+			},
+			wantErr: pricer.ErrDurationGap,
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			_, err := v.ParseDuration(tt.input)
-			if tt.wantErr {
-				assert.Error(t, err)
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, _ := mockConfig.GetSymbolConfig(tt.req.Symbol)
+			err := validator.ValidateAskRequest(tt.req, cfg)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Errorf("ValidateAskRequest() error = %v, want nil", err)
+				}
 			} else {
-				assert.NoError(t, err)
+				if err == nil {
+					t.Errorf("ValidateAskRequest() error = nil, want %v", tt.wantErr)
+				} else if !errors.Is(err, tt.wantErr) {
+					t.Errorf("ValidateAskRequest() error = %v, want %v", err, tt.wantErr)
+				}
 			}
 		})
 	}
 }
 
-// Test all supported symbols
-func TestValidateAskRequest_AllSupportedSymbols(t *testing.T) {
-	ctx := context.Background()
+// Test ValidateBidRequest
+func TestValidator_ValidateBidRequest(t *testing.T) {
+	mockConfig := &MockConfigProvider{
+		configs: map[string]*pricer.SymbolConfig{
+			"R_100": {
+				Symbol:     "R_100",
+				Commission: 0.05,
+				MaxPayout:  1000.0,
+				MinStake:   1.0,
+				Enabled:    true,
+			},
+		},
+	}
+	validator := NewValidator(mockConfig)
 
-	symbols := []string{"R_10", "R_25", "R_50", "R_75", "R_100"}
+	tests := []struct {
+		name    string
+		req     *pricer.BidRequest
+		wantErr error
+	}{
+		{
+			name: "valid bid request",
+			req: &pricer.BidRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 120,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				StartTime: 1736930600,
+				Stake:     10.0,
+				Payout:    27.85,
+			},
+			wantErr: nil,
+		},
+		{
+			name: "missing start time",
+			req: &pricer.BidRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 120,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				StartTime: 0,
+				Stake:     10.0,
+				Payout:    27.85,
+			},
+			wantErr: pricer.ErrMissingStartTime,
+		},
+		{
+			name: "missing payout",
+			req: &pricer.BidRequest{
+				Symbol:       "R_100",
+				ContractType: pricer.ContractTypeRise,
+				Currency:     "USD",
+				FirstDuration: pricer.Duration{
+					Value: 60,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				SecondDuration: pricer.Duration{
+					Value: 120,
+					Unit:  pricer.DurationUnitSeconds,
+				},
+				StartTime: 1736930600,
+				Stake:     10.0,
+				Payout:    0,
+			},
+			wantErr: pricer.ErrMissingPayout,
+		},
+	}
 
-	for _, sym := range symbols {
-		t.Run(sym, func(t *testing.T) {
-			cfg := &MockConfigProvider{}
-			cfg.On("GetSymbolConfig", sym).Return(&pricer.SymbolConfig{
-				Symbol:         sym,
-				CommissionRate: 0.05,
-				MaxPayout:      1000.00,
-				MinStake:       1.00,
-				Enabled:        true,
-			}, nil)
-
-			v := NewValidator(cfg)
-
-			req := &pricer.AskRequest{
-				Symbol:         sym,
-				ContractType:   pricer.ContractTypeRise,
-				Currency:       "USD",
-				FirstDuration:  "30s",
-				SecondDuration: "60s",
-				Stake:          "10.00",
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, _ := mockConfig.GetSymbolConfig(tt.req.Symbol)
+			err := validator.ValidateBidRequest(tt.req, cfg)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Errorf("ValidateBidRequest() error = %v, want nil", err)
+				}
+			} else {
+				if err == nil {
+					t.Errorf("ValidateBidRequest() error = nil, want %v", tt.wantErr)
+				} else if !errors.Is(err, tt.wantErr) {
+					t.Errorf("ValidateBidRequest() error = %v, want %v", err, tt.wantErr)
+				}
 			}
-
-			err := v.ValidateAskRequest(ctx, req)
-			require.NoError(t, err)
 		})
 	}
 }
 
-// Test tick-based duration validation
-func TestValidateAskRequest_TickBasedDurations(t *testing.T) {
-	ctx := context.Background()
-	cfg := &MockConfigProvider{}
-	cfg.On("GetSymbolConfig", "R_100").Return(defaultConfig(), nil)
-
-	v := NewValidator(cfg)
-
-	// Valid tick-based durations with 2+ tick gap
-	req := &pricer.AskRequest{
-		Symbol:         "R_100",
-		ContractType:   pricer.ContractTypeRise,
-		Currency:       "USD",
-		FirstDuration:  "3t",
-		SecondDuration: "5t", // Gap of 2 ticks
-		Stake:          "10.00",
+// Test isTimeBased
+func Test_isTimeBased(t *testing.T) {
+	tests := []struct {
+		name string
+		d    pricer.Duration
+		want bool
+	}{
+		{
+			name: "seconds is time-based",
+			d:    pricer.Duration{Value: 60, Unit: pricer.DurationUnitSeconds},
+			want: true,
+		},
+		{
+			name: "minutes is time-based",
+			d:    pricer.Duration{Value: 5, Unit: pricer.DurationUnitMinutes},
+			want: true,
+		},
+		{
+			name: "ticks is not time-based",
+			d:    pricer.Duration{Value: 5, Unit: pricer.DurationUnitTicks},
+			want: false,
+		},
 	}
 
-	err := v.ValidateAskRequest(ctx, req)
-	assert.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isTimeBased(tt.d)
+			if got != tt.want {
+				t.Errorf("isTimeBased() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

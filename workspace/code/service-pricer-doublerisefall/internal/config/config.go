@@ -1,153 +1,104 @@
+// Package config manages symbol configuration.
 package config
 
 import (
 	"fmt"
-	"strings"
+	"os"
 	"sync"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/pricer"
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
-// Config manages symbol-specific configuration.
+// Config represents the full configuration file structure.
 type Config struct {
+	Symbols  map[string]SymbolConfigYAML `yaml:"symbols"`
+	Defaults DefaultsYAML                `yaml:"defaults"`
+}
+
+// SymbolConfigYAML represents symbol config in YAML format.
+type SymbolConfigYAML struct {
+	Commission float64 `yaml:"commission"`
+	MaxPayout  float64 `yaml:"max_payout"`
+	MinStake   float64 `yaml:"min_stake"`
+	Enabled    bool    `yaml:"enabled"`
+}
+
+// DefaultsYAML represents default config values.
+type DefaultsYAML struct {
+	Commission float64 `yaml:"commission"`
+	MaxPayout  float64 `yaml:"max_payout"`
+	MinStake   float64 `yaml:"min_stake"`
+}
+
+// Manager handles configuration loading and access.
+type Manager struct {
 	mu      sync.RWMutex
-	symbols map[string]*pricer.SymbolConfig
-	v       *viper.Viper
+	configs map[string]*pricer.SymbolConfig
+	path    string
 }
 
-// symbolConfigYAML represents the YAML structure for symbol configuration.
-type symbolConfigYAML struct {
-	Symbol         string  `mapstructure:"symbol"`
-	CommissionRate float64 `mapstructure:"commission_rate"`
-	MaxPayout      float64 `mapstructure:"max_payout"`
-	MinStake       float64 `mapstructure:"min_stake"`
-	Enabled        bool    `mapstructure:"enabled"`
-}
-
-// configYAML represents the root YAML structure.
-type configYAML struct {
-	Symbols map[string]symbolConfigYAML `mapstructure:"symbols"`
-}
-
-// Load loads configuration from a YAML file.
-func Load(path string) (*Config, error) {
-	v := viper.New()
-	v.SetConfigFile(path)
-	v.SetConfigType("yaml")
-
-	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+// NewManager creates a config manager and loads configuration.
+func NewManager(path string) (*Manager, error) {
+	m := &Manager{
+		configs: make(map[string]*pricer.SymbolConfig),
+		path:    path,
 	}
 
-	cfg := &Config{
-		symbols: make(map[string]*pricer.SymbolConfig),
-		v:       v,
+	if err := m.load(); err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	if err := cfg.load(); err != nil {
-		return nil, err
-	}
-
-	return cfg, nil
-}
-
-// load parses the configuration and validates it.
-func (c *Config) load() error {
-	var yamlCfg configYAML
-	if err := c.v.Unmarshal(&yamlCfg); err != nil {
-		return fmt.Errorf("unmarshal config: %w", err)
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Clear existing config
-	c.symbols = make(map[string]*pricer.SymbolConfig)
-
-	// Load symbols (Viper lowercases all map keys)
-	for key, symCfg := range yamlCfg.Symbols {
-		// Validate configuration
-		if err := c.validateSymbolConfig(&symCfg); err != nil {
-			return fmt.Errorf("invalid config for %s: %w", key, err)
-		}
-
-		// Store with lowercase key for consistency
-		lowerKey := strings.ToLower(key)
-		c.symbols[lowerKey] = &pricer.SymbolConfig{
-			Symbol:         symCfg.Symbol,
-			CommissionRate: symCfg.CommissionRate,
-			MaxPayout:      symCfg.MaxPayout,
-			MinStake:       symCfg.MinStake,
-			Enabled:        symCfg.Enabled,
-		}
-	}
-
-	return nil
-}
-
-// validateSymbolConfig validates a symbol configuration.
-func (c *Config) validateSymbolConfig(cfg *symbolConfigYAML) error {
-	if cfg.Symbol == "" {
-		return fmt.Errorf("symbol cannot be empty")
-	}
-
-	if cfg.CommissionRate < 0 || cfg.CommissionRate > 1 {
-		return fmt.Errorf("commission_rate must be between 0 and 1")
-	}
-
-	if cfg.MaxPayout <= 0 {
-		return fmt.Errorf("max_payout must be positive")
-	}
-
-	if cfg.MinStake <= 0 {
-		return fmt.Errorf("min_stake must be positive")
-	}
-
-	return nil
+	return m, nil
 }
 
 // GetSymbolConfig returns configuration for a specific symbol.
-// Note: Viper lowercases all map keys, so we look up with lowercase.
-func (c *Config) GetSymbolConfig(symbol string) (*pricer.SymbolConfig, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+func (m *Manager) GetSymbolConfig(symbol string) (*pricer.SymbolConfig, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	// Viper lowercases all map keys, so we look up with lowercase
-	lookupKey := strings.ToLower(symbol)
-	cfg, ok := c.symbols[lookupKey]
+	cfg, ok := m.configs[symbol]
 	if !ok {
-		return nil, fmt.Errorf("symbol %s: %w", symbol, pricer.ErrInvalidSymbol)
+		return nil, pricer.ErrInvalidSymbol
 	}
 
-	if !cfg.Enabled {
-		return nil, fmt.Errorf("symbol %s: %w", symbol, pricer.ErrSymbolDisabled)
-	}
-
-	return cfg, nil
+	// Return a copy to prevent modification
+	configCopy := *cfg
+	return &configCopy, nil
 }
 
-// Reload reloads configuration from the file.
-func (c *Config) Reload() error {
-	if err := c.v.ReadInConfig(); err != nil {
-		return fmt.Errorf("reload config: %w", err)
-	}
+// Reload reloads configuration from disk.
+func (m *Manager) Reload() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	return c.load()
+	return m.load()
 }
 
-// Watch watches the configuration file for changes and reloads automatically.
-func (c *Config) Watch(onChange func()) {
-	c.v.WatchConfig()
-	c.v.OnConfigChange(func(e fsnotify.Event) {
-		if err := c.load(); err != nil {
-			// Log error but don't crash - keep using existing config
-			fmt.Printf("error reloading config: %v\n", err)
-			return
+// load reads and parses the configuration file.
+func (m *Manager) load() error {
+	data, err := os.ReadFile(m.path)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Build symbol configs
+	configs := make(map[string]*pricer.SymbolConfig)
+	for symbol, symCfg := range cfg.Symbols {
+		configs[symbol] = &pricer.SymbolConfig{
+			Symbol:     symbol,
+			Commission: symCfg.Commission,
+			MaxPayout:  symCfg.MaxPayout,
+			MinStake:   symCfg.MinStake,
+			Enabled:    symCfg.Enabled,
 		}
-		if onChange != nil {
-			onChange()
-		}
-	})
+	}
+
+	m.configs = configs
+	return nil
 }

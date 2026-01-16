@@ -1,3 +1,4 @@
+// Package feed provides a wrapper for the service-feed client.
 package feed
 
 import (
@@ -11,33 +12,27 @@ import (
 
 // Client wraps the service-feed client.
 type Client struct {
-	feedClient *client.Client
+	inner *client.Client
 }
 
-// NewClient creates a new feed client connected to the specified address.
-func NewClient(addr string, retryAttempts int, retryDelay time.Duration) (*Client, error) {
-	c, err := client.New(addr, retryAttempts, retryDelay)
+// NewClient creates a new feed client wrapper.
+func NewClient(addr string) (*Client, error) {
+	c, err := client.New(addr, 3, time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("create feed client: %w", err)
+		return nil, fmt.Errorf("failed to create feed client: %w", err)
 	}
-
-	return &Client{
-		feedClient: c,
-	}, nil
+	return &Client{inner: c}, nil
 }
 
-// GetTickForEpoch retrieves a tick for a specific epoch.
-// Returns the tick, is_final flag, and error.
+// GetTickForEpoch retrieves the tick at or after the specified epoch.
 func (c *Client) GetTickForEpoch(ctx context.Context, symbol string, epoch int64) (*pricer.Tick, bool, error) {
-	tick, isFinal, err := c.feedClient.GetTickForEpoch(ctx, symbol, epoch)
+	tick, isFinal, err := c.inner.GetTickForEpoch(ctx, symbol, epoch)
 	if err != nil {
-		return nil, false, fmt.Errorf("get tick for epoch: %w", err)
+		return nil, false, fmt.Errorf("feed error: %w", err)
 	}
-
 	if tick == nil {
 		return nil, isFinal, nil
 	}
-
 	return &pricer.Tick{
 		Symbol: tick.Symbol,
 		Time:   tick.Time.Seconds,
@@ -45,16 +40,11 @@ func (c *Client) GetTickForEpoch(ctx context.Context, symbol string, epoch int64
 	}, isFinal, nil
 }
 
-// GetTicksFromLimit retrieves N ticks starting from a specific epoch.
-// Returns the ticks, is_final flag, and error.
+// GetTicksFromLimit retrieves N ticks starting from the specified epoch.
 func (c *Client) GetTicksFromLimit(ctx context.Context, symbol string, start int64, limit int64) ([]*pricer.Tick, bool, error) {
-	ticks, isFinal, err := c.feedClient.GetTicksFromLimit(ctx, symbol, start, limit)
+	ticks, isFinal, err := c.inner.GetTicksFromLimit(ctx, symbol, start, limit)
 	if err != nil {
-		return nil, false, fmt.Errorf("get ticks from limit: %w", err)
-	}
-
-	if ticks == nil {
-		return nil, isFinal, nil
+		return nil, false, fmt.Errorf("feed error: %w", err)
 	}
 
 	result := make([]*pricer.Tick, 0, len(ticks))
@@ -69,40 +59,69 @@ func (c *Client) GetTicksFromLimit(ctx context.Context, symbol string, start int
 	return result, isFinal, nil
 }
 
-// Subscribe creates a real-time subscription to tick updates.
-// Returns a Subscription that provides a channel of ticks.
-func (c *Client) Subscribe(ctx context.Context, symbol string, start int64) *pricer.Subscription {
-	sub := c.feedClient.Subscribe(ctx, symbol, start)
-
-	// Create a channel to forward ticks
-	tickChan := make(chan *pricer.Tick, 10)
-
-	// Start goroutine to convert and forward ticks
-	go func() {
-		defer close(tickChan)
-		for tick := range sub.C() {
-			select {
-			case <-ctx.Done():
-				return
-			case tickChan <- &pricer.Tick{
-				Symbol: tick.Symbol,
-				Time:   tick.Time.Seconds,
-				Quote:  tick.Quote,
-			}:
-			}
-		}
-	}()
-
-	return &pricer.Subscription{
-		C:   tickChan,
-		Err: sub.Err(),
+// Subscribe creates a real-time tick subscription.
+func (c *Client) Subscribe(ctx context.Context, symbol string, start int64) pricer.Subscription {
+	sub := c.inner.Subscribe(ctx, symbol, start)
+	return &subscription{
+		inner: sub,
+		ch:    make(chan *pricer.Tick, 10),
+		ctx:   ctx,
 	}
 }
 
-// Close closes the underlying feed client connection.
+// Close closes the feed client connection.
 func (c *Client) Close() error {
-	if c.feedClient != nil {
-		return c.feedClient.Close()
+	return c.inner.Close()
+}
+
+// subscription wraps the feed subscription.
+type subscription struct {
+	inner *client.Subscription
+	ch    chan *pricer.Tick
+	ctx   context.Context
+	once  bool
+}
+
+// C returns the channel for receiving ticks.
+func (s *subscription) C() <-chan *pricer.Tick {
+	if !s.once {
+		s.once = true
+		go s.forward()
 	}
-	return nil
+	return s.ch
+}
+
+// Err returns any error that occurred during subscription.
+func (s *subscription) Err() error {
+	return s.inner.Err()
+}
+
+// Close closes the subscription.
+func (s *subscription) Close() {
+	s.inner.Close()
+}
+
+// forward converts ticks from the inner subscription to our domain type.
+func (s *subscription) forward() {
+	defer close(s.ch)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case tick, ok := <-s.inner.C():
+			if !ok {
+				return
+			}
+			domainTick := &pricer.Tick{
+				Symbol: tick.Symbol,
+				Time:   tick.Time.Seconds,
+				Quote:  tick.Quote,
+			}
+			select {
+			case s.ch <- domainTick:
+			case <-s.ctx.Done():
+				return
+			}
+		}
+	}
 }

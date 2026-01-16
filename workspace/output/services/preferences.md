@@ -1,95 +1,77 @@
 # Service Specifications Preferences
 
+> **Phase**: Services Specification
 > **Last Updated**: 2026-01-15
-> **Scope**: All service specifications in this workspace
+> **Status**: Active
+
+This document captures user directives and decisions for service specifications across all services in this project.
 
 ---
 
 ## General Service Standards
 
-### Language & Framework
+### Naming Conventions
 
-| Preference | Value | Rationale |
-|------------|-------|-----------|
-| **Primary Language** | Go 1.21+ | Performance, gRPC support, type safety |
-| **API Protocol** | gRPC + Protocol Buffers v3 | Type-safe contracts, streaming support |
-| **Configuration** | YAML + Viper | Human-readable, hot-reload capable |
-| **Logging** | slog (structured) | Standard library, JSON output |
-| **Testing** | Go testing + testify | Native framework with assertions |
+| Element | Convention | Example |
+|---------|------------|---------|
+| Service name | `service-pricer-{product}` | `service-pricer-doublerisefall` |
+| Package name | `{product}.v1` | `doublerisefall.v1` |
+| Module path | `github.com/regentmarkets/service-pricer-{product}` | `github.com/regentmarkets/service-pricer-doublerisefall` |
+| Internal packages | lowercase, single word | `pricer`, `contract`, `config`, `feed` |
 
-### Code Conventions
+### File Organization
 
-| Convention | Standard |
-|------------|----------|
-| **Package Naming** | Lowercase, single word (e.g., `pricer`, `grpcsvc`) |
-| **Interface Location** | Defined where consumed, not in shared packages |
-| **Error Handling** | Wrap errors with context, use domain error types |
-| **ID Format** | `TC-[SERVICE]-[3CHAR]` for test cases |
-
----
-
-## Service Structure
-
-### Module Organization
-
-| Preference | Value |
-|------------|-------|
-| **Interface Definition** | Interfaces defined where consumed (not centralized) |
-| **Package Isolation** | Each package handles one concern |
-| **Proto Types** | Never expose proto types in interfaces; use internal types |
-
-### Directory Structure Pattern
-
-```
-service-name/
-├── api/           # Generated gRPC code (do not edit)
-├── cmd/           # Application entry points
-├── config/        # Configuration files (YAML)
-├── internal/      # Private packages
-│   ├── app/       # Application initialization
-│   ├── grpcsvc/   # gRPC handlers
-│   └── ...        # Domain-specific packages
-├── proto/         # Proto definitions
-├── Dockerfile
-├── Makefile
-└── README.md
-```
+| Pattern | Application |
+|---------|-------------|
+| Interface-at-Consumer | Interfaces defined where consumed (in `pricer` package) |
+| No interfaces/models package | Dependencies flow toward core, not shared packages |
+| Test files co-located | `*_test.go` next to implementation files |
 
 ---
 
 ## Technology Stack
 
-### Service-Specific Preferences
+### Default Technology Choices
 
-#### [doublerisefall] Technology Stack
+| Category | Technology | Rationale |
+|----------|------------|-----------|
+| **Language** | Go 1.21+ | Team standard, excellent concurrency |
+| **Protocol** | gRPC/Protocol Buffers | High-performance internal communication |
+| **Configuration** | YAML + Viper | Human-readable, hot-reload support |
+| **Logging** | slog (stdlib) | Standard library structured logging |
+| **Build Tooling** | buf | Modern protobuf toolchain |
+| **Testing** | stdlib testing | Table-driven tests pattern |
 
-| Component | Choice | Notes |
-|-----------|--------|-------|
-| Language | Go 1.21+ | Standard for pricing services |
-| API | gRPC | Server streaming for real-time prices |
-| Config | YAML + Viper | Hot-reload for symbol configuration |
-| External Client | service-feed/client | **MANDATORY**: Use provided client, not direct gRPC |
+### Service-Specific Overrides
+
+_No overrides recorded yet._
 
 ---
 
 ## Module Design
 
-### Dependency Patterns
+### Dependency Direction
 
-| Pattern | Description |
-|---------|-------------|
-| **Dependency Inversion** | Core logic defines interfaces, infrastructure implements |
-| **Thin Wrappers** | External clients wrapped for testability |
-| **No Circular Dependencies** | Clear directional flow between packages |
+```
+grpcsvc → pricer ← (contract, config, feed)
+```
 
-### Common Package Responsibilities
+**Rules**:
+1. `grpcsvc` depends on `pricer`
+2. `pricer` defines interfaces
+3. `contract`, `config`, `feed` implement interfaces
+4. `pricer` MUST NOT import from other internal packages
 
-| Package | Typical Responsibility |
-|---------|------------------------|
-| `grpcsvc` | Request handling, response formatting, error mapping |
-| `config` | Configuration loading, validation, accessor methods |
-| `feed` | External service client wrappers |
-| Core logic | Business rules, calculations, domain validation |
+### Standard Modules for Pricing Services
+
+| Module | Purpose | Required When |
+|--------|---------|---------------|
+| `grpcsvc` | gRPC handlers | Always |
+| `pricer` | Core pricing logic, interfaces | Always |
+| `contract` | Duration parsing, validation | Product has business rules |
+| `config` | Symbol configuration | Product has per-symbol config |
+| `feed` | Market data wrapper | Product needs market data |
+| `app` | DI wiring, lifecycle | Always |
 
 ---
 
@@ -97,32 +79,68 @@ service-name/
 
 ### Error Handling
 
-| Guideline | Description |
-|-----------|-------------|
-| **Error Codes** | Use service-specific prefix (e.g., `ERR-DF-` for doublerisefall) |
-| **gRPC Mapping** | Map domain errors to appropriate gRPC status codes |
-| **Logging** | Log errors with structured context, no PII |
+| Pattern | Application |
+|---------|-------------|
+| Domain errors | Custom error types in each package |
+| gRPC mapping | Convert domain errors to gRPC status in `grpcsvc` |
+| Error codes | Format: `ERR-{SVC}-{CODE}` (e.g., `ERR-DR-S1V`) |
+
+### Logging
+
+| Level | Usage |
+|-------|-------|
+| `DEBUG` | Detailed execution flow |
+| `INFO` | Request/response summaries |
+| `WARN` | Recoverable issues |
+| `ERROR` | Failures requiring attention |
 
 ### Testing
 
-| Guideline | Description |
-|-----------|-------------|
-| **Unit Tests** | Test business logic with mocked dependencies |
-| **Coverage Target** | 80%+ for business logic packages |
-| **Mock Pattern** | Use interface-based mocks with testify |
+| Level | Coverage Target | Tools |
+|-------|-----------------|-------|
+| Unit | 80%+ | stdlib `testing`, table-driven |
+| Integration | Key paths | Mock interfaces |
+| E2E | Happy paths | `grpcurl`, test containers |
 
-### Deployment
+### Test ID Convention
 
-| Guideline | Description |
-|-----------|-------------|
-| **Container** | Multi-stage Docker build (builder + alpine) |
-| **Health Check** | gRPC health check protocol |
-| **Probes** | readinessProbe and livenessProbe on gRPC port |
+Format: `TC-{SVC}-{PKG}{NUM}{CHAR}`
+
+- SVC: Two-letter service code (DR for doublerisefall)
+- PKG: Package indicator (P=pricer, C=contract, F=config, E=feed, G=grpcsvc)
+- NUM: Test number
+- CHAR: Random alphanumeric
+
+Examples: `TC-DR-P1A`, `TC-DR-C3C`, `TC-DR-E2B`
 
 ---
 
-## Changelog
+## Service-Specific Preferences
 
-| Date | Change | Service |
-|------|--------|---------|
-| 2026-01-15 | Initial preferences created | doublerisefall |
+### [service-pricer-doublerisefall]
+
+| Category | Decision | Rationale |
+|----------|----------|-----------|
+| **Complexity Score** | 6/10 (Standard) | Multiple components but single product |
+| **Internal Structure** | Light modular | Organized components without over-engineering |
+| **REST Gateway** | Not included | Internal service, no external consumers |
+| **Database** | None | Stateless, all data from feed/config |
+| **Streaming** | Server-side only | Client subscribes, server pushes updates |
+
+---
+
+## User Decisions Log
+
+| Date | Decision | Context |
+|------|----------|---------|
+| 2026-01-15 | Initial preferences created | First service specification (doublerisefall) |
+
+---
+
+## Pending Decisions
+
+_No pending decisions._
+
+---
+
+> **Note**: Update this file when making technology or design decisions that should apply to future services.

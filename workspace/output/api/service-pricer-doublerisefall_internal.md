@@ -1,122 +1,104 @@
-# Internal API Specification: service-pricer-doublerisefall
+# Internal API Specification: Double Rise/Fall Pricing Service
 
+> **Service**: `service-pricer-doublerisefall`
+> **API Type**: Internal (gRPC)
 > **Version**: 1.0.0
+> **Status**: Draft
 > **Created**: 2026-01-15
-> **API Type**: Internal
-> **Status**: DRAFT
 
 ---
 
 ## Overview
 
-This document specifies the internal gRPC API provided by `service-pricer-doublerisefall` for service-to-service communication. The API enables contract price calculation (Ask) and contract value evaluation (Bid) for the Double Rise/Fall digital binary option product.
+This document specifies the internal gRPC API for the Double Rise/Fall Pricing Service (`service-pricer-doublerisefall`). This service calculates ask (purchase) and bid (valuation) prices for Double Rise/Fall binary options contracts.
 
 ### Purpose
-Provide real-time pricing capabilities for path-dependent binary options that evaluate spot prices against a barrier at two distinct timestamps (t1 and t2).
+Calculate contract prices for Double Rise/Fall binary options using a bivariate normal distribution pricing model.
 
 ### Scope
-- Contract price calculation with commission markup
-- Payout computation based on fair probability
-- Contract value evaluation at expiry
-- Real-time streaming of prices and values
+- Ask price calculation (contract purchase)
+- Bid price calculation (active contract valuation)
+- Real-time price streaming
 
 ### Target Consumers
-
 | Consumer | Purpose | Priority |
 |----------|---------|----------|
-| `api-gateway-trading` | Request contract prices for client display and contract purchase | Primary |
+| `api-gateway-trading` | Contract pricing for client display and purchase | **Critical** |
 
 ---
 
 ## Authentication & Authorization
 
 ### Service-to-Service Authentication
+| Aspect | Value |
+|--------|-------|
+| **Method** | mTLS (mutual TLS) |
+| **Certificate Management** | Kubernetes secrets |
+| **Authorization** | Service mesh policy (allowed consumers list) |
 
-| Field | Value |
-|-------|-------|
-| **Authentication Required** | No |
-| **Method** | N/A |
-| **Rationale** | Internal service consumed only by api-gateway-trading within trusted network |
+### Allowed Consumers
+| Service | Access Level |
+|---------|--------------|
+| `api-gateway-trading` | Full (all methods) |
 
-### Network Security
-
-| Aspect | Configuration |
-|--------|---------------|
-| **Network** | Internal Kubernetes cluster network |
-| **TLS** | Optional (mTLS recommended for production) |
-| **Access Control** | Kubernetes NetworkPolicy restricts access to api-gateway-trading |
+> **Note**: This is an internal service with no external authentication. Access is controlled via service mesh policies.
 
 ---
 
 ## Base Configuration
 
-| Field | Value |
-|-------|-------|
-| **Protocol** | gRPC (Protocol Buffers v3) |
-| **Package** | `doublerisefall.v1` |
+| Property | Value |
+|----------|-------|
+| **Protocol** | gRPC / Protocol Buffers |
+| **Proto Package** | `doublerisefall.v1` |
 | **Service Name** | `DoubleRiseFallService` |
 | **Default Port** | 50051 |
-| **Health Check Port** | 50051 (gRPC health check protocol) |
+| **Health Check Port** | 8081 (HTTP) |
 | **Content Type** | `application/grpc` |
-| **Versioning Strategy** | Package versioning (v1, v2, etc.) |
+| **Versioning** | Package versioning (`v1`, `v2`, etc.) |
 
-### Service Address
-
-| Environment | Address |
-|-------------|---------|
-| Development | `localhost:50051` |
-| Kubernetes | `service-pricer-doublerisefall.default.svc.cluster.local:50051` |
-
-### Proto Import
-
-```protobuf
-syntax = "proto3";
-
-package doublerisefall.v1;
-
-option go_package = "github.com/regentmarkets/service-pricer-doublerisefall/api/";
-```
+### Service Discovery
+| Property | Value |
+|----------|-------|
+| **Kubernetes Service** | `service-pricer-doublerisefall.default.svc.cluster.local:50051` |
+| **Environment Variable** | `DOUBLERISEFALL_SERVICE_ADDR` |
 
 ---
 
 ## Table of Endpoints
 
-| Endpoint ID | RPC Method | Pattern | Summary |
-|-------------|------------|---------|---------|
-| API-DF-A1K | GetAsk | Unary | Request single contract price |
-| API-DF-A2S | StreamAsk | Server Streaming | Stream live contract prices |
-| API-DF-B1V | GetBid | Unary | Request contract value/status |
-| API-DF-B2T | StreamBid | Server Streaming | Stream live contract value |
+| Method | RPC Type | Request | Response | Summary |
+|--------|----------|---------|----------|---------|
+| `GetAsk` | Unary | `GetAskRequest` | `GetAskResponse` | Calculate contract purchase price |
+| `StreamAsk` | Server Stream | `StreamAskRequest` | `stream GetAskResponse` | Real-time price updates |
+| `GetBid` | Unary | `GetBidRequest` | `GetBidResponse` | Value an active contract |
+| `StreamBid` | Server Stream | `StreamBidRequest` | `stream GetBidResponse` | Real-time contract valuation |
 
 ---
 
 ## Endpoints & Methods
 
-### API-DF-A1K: GetAsk
+### API-DR-A1K: GetAsk
 
-Request a single contract price (Ask) for the Double Rise/Fall product.
+Calculate the ask (purchase) price for a Double Rise/Fall contract.
 
-| Field | Value |
-|-------|-------|
-| **RPC Method** | `GetAsk` |
-| **Pattern** | Unary |
-| **Request Type** | `GetAskRequest` |
-| **Response Type** | `GetAskResponse` |
-| **Priority** | Critical |
+| Property | Value |
+|----------|-------|
+| **ID** | `API-DR-A1K` |
+| **Method** | `GetAsk` |
+| **RPC Type** | Unary |
+| **Request** | `GetAskRequest` |
+| **Response** | `GetAskResponse` |
 
 #### Purpose
-
-Calculate the premium (ask price) and potential payout for a Double Rise/Fall contract based on:
-- Fair probability derived from the arcsin correlation formula
-- Commission markup per symbol configuration
-- Current spot price from market feed
+Calculate the contract purchase price (stake to payout ratio) for a new Double Rise/Fall contract based on current market conditions.
 
 #### Request Schema
 
 ```protobuf
 message GetAskRequest {
   OptionParameters option_parameters = 1;
-  optional int64 pricing_time = 2;      // Optional: For repricing historical
+  optional int64 pricing_time = 2;        // Unix epoch (seconds)
 }
 ```
 
@@ -124,35 +106,32 @@ message GetAskRequest {
 
 ```protobuf
 message GetAskResponse {
-  string ask_price = 1;                 // Contract price (premium)
-  string currency = 2;                  // Quote currency
-  string current_spot = 3;              // Current market price
-  int64 current_spot_time = 4;          // Timestamp of spot price
-  string payout = 5;                    // Potential payout
-  Limits limits = 6;                    // Trading limits
+  string ask_price = 1;                   // Contract price (premium)
+  string currency = 2;                    // Quote currency
+  string current_spot = 3;                // Current market price
+  int64 current_spot_time = 4;            // Unix epoch of spot price
+  string payout = 5;                      // Potential payout
+  Limits limits = 6;                      // Trading limits
 }
 ```
 
 #### Success Response
-
-| Status Code | Description |
-|-------------|-------------|
-| OK (0) | Price calculated successfully |
+- **gRPC Status**: `OK`
+- Returns `GetAskResponse` with calculated price
 
 #### Error Responses
-
-| gRPC Status | Error Code | Description |
-|-------------|------------|-------------|
-| INVALID_ARGUMENT (3) | ERR-DF-S1K | Invalid symbol |
-| INVALID_ARGUMENT (3) | ERR-DF-D1N | Invalid duration format |
-| INVALID_ARGUMENT (3) | ERR-DF-D2O | Duration order invalid (second ≤ first) |
-| INVALID_ARGUMENT (3) | ERR-DF-D3G | Duration gap invalid (< 10s or < 2t) |
-| INVALID_ARGUMENT (3) | ERR-DF-K1M | Invalid stake (below minimum) |
-| INVALID_ARGUMENT (3) | ERR-DF-P1X | Payout exceeds maximum |
-| INVALID_ARGUMENT (3) | ERR-DF-T1F | Pricing time in future |
-| FAILED_PRECONDITION (9) | ERR-DF-S2D | Symbol disabled |
-| UNAVAILABLE (14) | ERR-DF-M1E | Market data unavailable |
-| INTERNAL (13) | ERR-DF-I1X | Internal server error |
+| gRPC Status | Error Code | Condition |
+|-------------|------------|-----------|
+| `INVALID_ARGUMENT` | `ERR-DR-S1V` | Invalid symbol |
+| `INVALID_ARGUMENT` | `ERR-DR-D2U` | Invalid duration format |
+| `INVALID_ARGUMENT` | `ERR-DR-D3O` | Duration order invalid (t2 ≤ t1) |
+| `INVALID_ARGUMENT` | `ERR-DR-D4G` | Duration gap invalid |
+| `INVALID_ARGUMENT` | `ERR-DR-K5S` | Stake below minimum |
+| `INVALID_ARGUMENT` | `ERR-DR-P6X` | Payout exceeds maximum |
+| `INVALID_ARGUMENT` | `ERR-DR-T2F` | Future pricing time |
+| `FAILED_PRECONDITION` | `ERR-DR-Y7D` | Symbol disabled |
+| `UNAVAILABLE` | `ERR-DR-M8E` | Market data unavailable |
+| `INTERNAL` | `ERR-DR-I9N` | Internal server error |
 
 #### Example
 
@@ -176,8 +155,8 @@ message GetAskResponse {
   "ask_price": "10.00",
   "currency": "USD",
   "current_spot": "1234.5678",
-  "current_spot_time": 1736916600,
-  "payout": "30.12",
+  "current_spot_time": 1736930731,
+  "payout": "27.85",
   "limits": {
     "max_payout": "1000.00",
     "min_stake": "1.00"
@@ -187,23 +166,20 @@ message GetAskResponse {
 
 ---
 
-### API-DF-A2S: StreamAsk
+### API-DR-S2T: StreamAsk
 
-Stream live contract prices (Ask) with updates on market tick changes.
+Stream real-time ask price updates for a Double Rise/Fall contract.
 
-| Field | Value |
-|-------|-------|
-| **RPC Method** | `StreamAsk` |
-| **Pattern** | Server Streaming |
-| **Request Type** | `StreamAskRequest` |
-| **Response Type** | `stream GetAskResponse` |
-| **Priority** | High |
+| Property | Value |
+|----------|-------|
+| **ID** | `API-DR-S2T` |
+| **Method** | `StreamAsk` |
+| **RPC Type** | Server Streaming |
+| **Request** | `StreamAskRequest` |
+| **Response** | `stream GetAskResponse` |
 
 #### Purpose
-
-Provide real-time price updates for a Double Rise/Fall contract as market data changes. The stream emits:
-- On each tick update from market feed
-- Every 5 seconds as keepalive (time-based contracts only)
+Provide continuous price updates for contract pricing display. Updates are sent on each market tick or every 5 seconds (whichever comes first) for time-based contracts.
 
 #### Request Schema
 
@@ -215,55 +191,36 @@ message StreamAskRequest {
 ```
 
 #### Response Schema
-
-Same as `GetAskResponse` (streamed repeatedly).
+Returns a stream of `GetAskResponse` messages (same as `GetAsk`).
 
 #### Stream Behavior
-
-| Trigger | Time-Based Contract | Tick-Based Contract |
-|---------|---------------------|---------------------|
-| Market tick update | ✅ Emit response | ✅ Emit response |
-| 5-second interval | ✅ Emit response | ❌ No emission |
-
-#### Stream Termination
-
-| Condition | Behavior |
-|-----------|----------|
-| Client cancellation | Graceful close |
-| Server shutdown | UNAVAILABLE status |
-| Market data disconnection | UNAVAILABLE status with reconnect attempt |
-| Invalid request | Immediate termination with error |
+| Contract Type | Update Trigger |
+|---------------|----------------|
+| Time-based | On tick OR every 5 seconds |
+| Tick-based | On tick only |
 
 #### Error Responses
-
-Same error codes as GetAsk, plus:
-
-| gRPC Status | Error Code | Description |
-|-------------|------------|-------------|
-| CANCELLED (1) | - | Client cancelled stream |
-| UNAVAILABLE (14) | ERR-DF-M2R | Market data stream interrupted |
+Same as `GetAsk`, plus:
+| gRPC Status | Error Code | Condition |
+|-------------|------------|-----------|
+| `UNAVAILABLE` | `ERR-DR-C1D` | Stream disconnected |
 
 ---
 
-### API-DF-B1V: GetBid
+### API-DR-B3V: GetBid
 
-Request the current value (Bid) of an active or expired contract.
+Calculate the bid (valuation) price for an active Double Rise/Fall contract.
 
-| Field | Value |
-|-------|-------|
-| **RPC Method** | `GetBid` |
-| **Pattern** | Unary |
-| **Request Type** | `GetBidRequest` |
-| **Response Type** | `GetBidResponse` |
-| **Priority** | Critical |
+| Property | Value |
+|----------|-------|
+| **ID** | `API-DR-B3V` |
+| **Method** | `GetBid` |
+| **RPC Type** | Unary |
+| **Request** | `GetBidRequest` |
+| **Response** | `GetBidResponse` |
 
 #### Purpose
-
-Evaluate the current value of a Double Rise/Fall contract by:
-- Fetching entry tick (barrier) at start_time
-- Fetching spot at evaluation times (t1, t2)
-- Applying win/loss conditions (RISE: spot > barrier at BOTH t1 AND t2)
-- Returning payout (win) or 0 (loss)
+Determine the current value of an active contract, including whether it has expired and the win/loss outcome.
 
 #### Request Schema
 
@@ -274,57 +231,52 @@ message GetBidRequest {
 }
 ```
 
-**Required Fields for Bid:**
-- `option_parameters.start_time` - Contract start time
-- `option_parameters.payout` - Payout from original Ask response
+**Required Fields for Bid**:
+- `option_parameters.start_time` - Contract start time (required)
+- `option_parameters.payout` - Original payout from Ask (required)
 
 #### Response Schema
 
 ```protobuf
 message GetBidResponse {
-  string bid_price = 1;                 // Current contract value
-  bool is_expired = 2;                  // Expiry status
-  string current_spot = 3;              // Current market price
-  int64 current_spot_time = 4;          // Timestamp of current spot
-  string entry_spot = 5;                // Entry price (barrier)
-  int64 entry_spot_time = 6;            // Timestamp of entry tick
-  string exit_spot = 7;                 // Exit price (if expired)
-  int64 exit_spot_time = 8;             // Timestamp of exit tick
-  string barrier = 9;                   // Resolved barrier value
-  int64 start_time = 10;                // Contract start time
-  int64 expiry_time = 11;               // Contract expiry time
-  string currency = 12;                 // Quote currency
-  int64 evaluation_time = 13;           // First evaluation time (t1)
+  string bid_price = 1;                   // Current contract value
+  bool is_expired = 2;                    // Expiry status
+  string current_spot = 3;                // Current market price
+  int64 current_spot_time = 4;            // Timestamp of current spot
+  string entry_spot = 5;                  // Entry price (barrier)
+  int64 entry_spot_time = 6;              // Timestamp of entry tick
+  string exit_spot = 7;                   // Exit price (if expired)
+  int64 exit_spot_time = 8;               // Timestamp of exit tick
+  string barrier = 9;                     // Resolved barrier value
+  int64 start_time = 10;                  // Contract start time
+  int64 expiry_time = 11;                 // Contract expiry time (t2)
+  string currency = 12;                   // Quote currency
+  int64 evaluation_time = 13;             // First evaluation time (t1)
 }
 ```
 
-#### Win/Loss Evaluation
-
-| Contract Type | Win Condition | Result |
-|---------------|---------------|--------|
-| RISE | spot_t1 > barrier AND spot_t2 > barrier | bid_price = payout |
-| RISE | spot_t1 ≤ barrier OR spot_t2 ≤ barrier | bid_price = 0 |
-| FALL | spot_t1 < barrier AND spot_t2 < barrier | bid_price = payout |
-| FALL | spot_t1 ≥ barrier OR spot_t2 ≥ barrier | bid_price = 0 |
-
-**Critical**: If condition fails at t1, contract expires worthless immediately.
+#### Bid Price Logic
+| Contract State | `bid_price` | `is_expired` |
+|----------------|-------------|--------------|
+| Active (pre-t1) | Current spot info | `false` |
+| Active (post-t1, pre-t2) | Depends on t1 result | `false` |
+| Expired - Won | Original payout | `true` |
+| Expired - Lost | `"0"` | `true` |
 
 #### Success Response
-
-| Status Code | Description |
-|-------------|-------------|
-| OK (0) | Bid evaluated successfully |
+- **gRPC Status**: `OK`
+- Returns `GetBidResponse` with contract valuation
 
 #### Error Responses
-
-Same as GetAsk, plus:
-
-| gRPC Status | Error Code | Description |
-|-------------|------------|-------------|
-| INVALID_ARGUMENT (3) | ERR-DF-R1S | Missing start_time (required for Bid) |
-| INVALID_ARGUMENT (3) | ERR-DF-R2P | Missing payout (required for Bid) |
-| FAILED_PRECONDITION (9) | ERR-DF-E1M | Missing entry tick at start_time |
-| FAILED_PRECONDITION (9) | ERR-DF-E2T | Missing tick at evaluation time |
+| gRPC Status | Error Code | Condition |
+|-------------|------------|-----------|
+| `INVALID_ARGUMENT` | `ERR-DR-S1V` | Invalid symbol |
+| `INVALID_ARGUMENT` | `ERR-DR-D2U` | Invalid duration |
+| `INVALID_ARGUMENT` | `ERR-DR-T1M` | Missing start_time |
+| `INVALID_ARGUMENT` | `ERR-DR-P2Y` | Missing payout |
+| `FAILED_PRECONDITION` | `ERR-DR-E3T` | Missing entry tick |
+| `UNAVAILABLE` | `ERR-DR-M8E` | Market data unavailable |
+| `INTERNAL` | `ERR-DR-I9N` | Internal server error |
 
 #### Example
 
@@ -337,49 +289,48 @@ Same as GetAsk, plus:
     "currency": "USD",
     "first_duration": "1m",
     "second_duration": "2m",
-    "start_time": 1736916000,
+    "start_time": 1736930600,
     "stake": "10.00",
-    "payout": "30.12"
+    "payout": "27.85"
   }
 }
 ```
 
-**Response (Win):**
+**Response (Expired - Won):**
 ```json
 {
-  "bid_price": "30.12",
+  "bid_price": "27.85",
   "is_expired": true,
-  "current_spot": "1235.0000",
-  "current_spot_time": 1736916120,
-  "entry_spot": "1234.0000",
-  "entry_spot_time": 1736916001,
-  "exit_spot": "1235.0000",
-  "exit_spot_time": 1736916120,
-  "barrier": "1234.0000",
-  "start_time": 1736916000,
-  "expiry_time": 1736916120,
+  "current_spot": "1235.1234",
+  "current_spot_time": 1736930731,
+  "entry_spot": "1234.5678",
+  "entry_spot_time": 1736930601,
+  "exit_spot": "1235.1234",
+  "exit_spot_time": 1736930720,
+  "barrier": "1234.5678",
+  "start_time": 1736930600,
+  "expiry_time": 1736930720,
   "currency": "USD",
-  "evaluation_time": 1736916060
+  "evaluation_time": 1736930660
 }
 ```
 
 ---
 
-### API-DF-B2T: StreamBid
+### API-DR-S4B: StreamBid
 
-Stream live contract value (Bid) with updates as contract progresses toward expiry.
+Stream real-time bid price updates for an active Double Rise/Fall contract.
 
-| Field | Value |
-|-------|-------|
-| **RPC Method** | `StreamBid` |
-| **Pattern** | Server Streaming |
-| **Request Type** | `StreamBidRequest` |
-| **Response Type** | `stream GetBidResponse` |
-| **Priority** | High |
+| Property | Value |
+|----------|-------|
+| **ID** | `API-DR-S4B` |
+| **Method** | `StreamBid` |
+| **RPC Type** | Server Streaming |
+| **Request** | `StreamBidRequest` |
+| **Response** | `stream GetBidResponse` |
 
 #### Purpose
-
-Provide real-time updates on contract value and status. Stream terminates automatically when contract expires.
+Provide continuous contract valuation updates until contract expiry.
 
 #### Request Schema
 
@@ -390,66 +341,33 @@ message StreamBidRequest {
 }
 ```
 
-#### Response Schema
+**Required Fields**:
+- `option_parameters.start_time` - Contract start time
+- `option_parameters.payout` - Original payout from Ask
 
-Same as `GetBidResponse` (streamed repeatedly).
+#### Response Schema
+Returns a stream of `GetBidResponse` messages (same as `GetBid`).
 
 #### Stream Behavior
-
-| Trigger | Time-Based Contract | Tick-Based Contract |
-|---------|---------------------|---------------------|
-| Market tick update | ✅ Emit response | ✅ Emit response |
-| 5-second interval | ✅ Emit response | ❌ No emission |
-| Contract expiry | ✅ Final response + close | ✅ Final response + close |
-
-**Critical**: Tick-based contracts have NO time-based fallback for StreamBid.
+| Contract Type | Update Trigger | Termination |
+|---------------|----------------|-------------|
+| Time-based | On tick OR every 5 seconds | After expiry response |
+| Tick-based | On tick only | After expiry response |
 
 #### Stream Termination
-
-| Condition | Behavior |
-|-----------|----------|
-| Contract expired | Final response with `is_expired=true`, then close |
-| Client cancellation | Graceful close |
-| Server shutdown | UNAVAILABLE status |
-| Market data disconnection | UNAVAILABLE status |
+The stream terminates automatically after sending the final expiry response (`is_expired: true`).
 
 #### Error Responses
-
-Same error codes as GetBid.
+Same as `GetBid`, plus:
+| gRPC Status | Error Code | Condition |
+|-------------|------------|-----------|
+| `UNAVAILABLE` | `ERR-DR-C1D` | Stream disconnected |
 
 ---
 
 ## Data Models & Schemas
 
-### OptionParameters
-
-Core contract parameters used across all endpoints.
-
-```protobuf
-message OptionParameters {
-  string symbol = 1;                    // Required: Underlying asset
-  ContractType contract_type = 2;       // Required: Contract direction
-  string currency = 3;                  // Required: Payout currency
-  string first_duration = 4;            // Required: e.g., "1m", "30s", "5t"
-  string second_duration = 5;           // Required: e.g., "2m", "60s", "10t"
-  optional int64 start_time = 6;        // Required for Bid requests
-  string stake = 7;                     // Required: Premium amount
-  optional string payout = 8;           // Required for Bid requests (from Ask response)
-}
-```
-
-| Field | Type | Required (Ask) | Required (Bid) | Description |
-|-------|------|----------------|----------------|-------------|
-| symbol | string | ✅ | ✅ | Underlying asset (R_10, R_25, R_50, R_75, R_100) |
-| contract_type | ContractType | ✅ | ✅ | RISE or FALL |
-| currency | string | ✅ | ✅ | Payout currency (e.g., USD) |
-| first_duration | string | ✅ | ✅ | Duration to first evaluation (t1) |
-| second_duration | string | ✅ | ✅ | Duration to second evaluation/expiry (t2) |
-| start_time | int64 | ❌ | ✅ | Contract start time (Unix epoch) |
-| stake | string | ✅ | ✅ | Premium amount |
-| payout | string | ❌ | ✅ | Payout from original Ask response |
-
-### ContractType
+### ContractType (Enum)
 
 ```protobuf
 enum ContractType {
@@ -461,43 +379,61 @@ enum ContractType {
 
 | Value | Description |
 |-------|-------------|
-| CONTRACT_TYPE_UNSPECIFIED | Invalid/unset |
-| CONTRACT_TYPE_RISE | Win if spot > barrier at both t1 and t2 |
-| CONTRACT_TYPE_FALL | Win if spot < barrier at both t1 and t2 |
+| `CONTRACT_TYPE_UNSPECIFIED` | Invalid/unset |
+| `CONTRACT_TYPE_RISE` | Win if spot > barrier at both t1 AND t2 |
+| `CONTRACT_TYPE_FALL` | Win if spot < barrier at both t1 AND t2 |
 
-### Limits
-
-Trading limits for the symbol.
+### OptionParameters (Message)
 
 ```protobuf
-message Limits {
-  string max_payout = 1;
-  string min_stake = 2;
+message OptionParameters {
+  string symbol = 1;                      // Required: Underlying asset (e.g., "R_100")
+  ContractType contract_type = 2;         // Required: Contract direction
+  string currency = 3;                    // Required: Payout currency (e.g., "USD")
+  string first_duration = 4;              // Required: Duration to t1 (e.g., "1m", "5t")
+  string second_duration = 5;             // Required: Duration to t2 (e.g., "2m", "10t")
+  optional int64 start_time = 6;          // Required for Bid: Contract start time
+  string stake = 7;                       // Required: Premium amount
+  optional string payout = 8;             // Required for Bid: Original payout
 }
 ```
 
-### Duration Format
+#### Field Validation Rules
 
-Duration strings support two formats:
+| Field | Validation | Error Code |
+|-------|------------|------------|
+| `symbol` | Must be in: `R_10`, `R_25`, `R_50`, `R_75`, `R_100` | `ERR-DR-S1V` |
+| `contract_type` | Must be `RISE` or `FALL` | `ERR-DR-C2T` |
+| `currency` | Must be supported currency | `ERR-DR-C3U` |
+| `first_duration` | Valid format: `\d+(s|m|h|d|t)` | `ERR-DR-D2U` |
+| `second_duration` | Valid format: `\d+(s|m|h|d|t)`, must be > first_duration | `ERR-DR-D3O` |
+| `stake` | Must be ≥ min_stake (1.00 USD) | `ERR-DR-K5S` |
 
-| Format | Unit | Examples | Validation |
-|--------|------|----------|------------|
-| Time-based | seconds (s), minutes (m), hours (h), days (d) | "30s", "1m", "2h", "1d" | Max: 1 day |
-| Tick-based | ticks (t) | "5t", "10t" | Min: 2t, Max: 10t |
+#### Duration Format
 
-**Validation Rules:**
-- second_duration > first_duration
-- Gap ≥ 10 seconds (time-based) or ≥ 2 ticks (tick-based)
+| Unit | Format | Example | Range |
+|------|--------|---------|-------|
+| Seconds | `{n}s` | `30s` | 10s - 86400s |
+| Minutes | `{n}m` | `5m` | 1m - 1440m |
+| Hours | `{n}h` | `2h` | 1h - 24h |
+| Days | `{n}d` | `1d` | 1d only |
+| Ticks | `{n}t` | `5t` | 2t - 10t |
 
-### Supported Symbols
+#### Duration Gap Constraints
 
-| Symbol | Commission | Max Payout | Min Stake | Enabled |
-|--------|------------|------------|-----------|---------|
-| R_10 | 5% (0.05) | 1000 USD | 1 USD | ✅ |
-| R_25 | 5% (0.05) | 1000 USD | 1 USD | ✅ |
-| R_50 | 5% (0.05) | 1000 USD | 1 USD | ✅ |
-| R_75 | 5% (0.05) | 1000 USD | 1 USD | ✅ |
-| R_100 | 5% (0.05) | 1000 USD | 1 USD | ✅ |
+| Type | Minimum Gap |
+|------|-------------|
+| Time-based | 10 seconds |
+| Tick-based | 2 ticks |
+
+### Limits (Message)
+
+```protobuf
+message Limits {
+  string max_payout = 1;                  // Maximum payout limit
+  string min_stake = 2;                   // Minimum stake limit
+}
+```
 
 ---
 
@@ -505,164 +441,92 @@ Duration strings support two formats:
 
 ### Standard Error Format
 
-All errors are returned using standard gRPC status codes with detailed error information in the status message.
-
-```go
-// Error response structure
-status.Errorf(codes.InvalidArgument, "ERR-DF-S1K: invalid symbol: %s", symbol)
-```
-
-### Error Code Reference
-
-| Error Code | gRPC Status | HTTP Equiv | Description | Client Action |
-|------------|-------------|------------|-------------|---------------|
-| ERR-DF-S1K | INVALID_ARGUMENT | 400 | Symbol not supported | Check supported symbol list |
-| ERR-DF-S2D | FAILED_PRECONDITION | 400 | Symbol trading disabled | Choose different symbol |
-| ERR-DF-D1N | INVALID_ARGUMENT | 400 | Invalid duration format | Use valid format (s, m, h, d, t) |
-| ERR-DF-D2O | INVALID_ARGUMENT | 400 | Duration order invalid | Ensure second > first |
-| ERR-DF-D3G | INVALID_ARGUMENT | 400 | Duration gap invalid | Increase gap (≥10s or ≥2t) |
-| ERR-DF-K1M | INVALID_ARGUMENT | 400 | Stake below minimum | Increase stake |
-| ERR-DF-P1X | INVALID_ARGUMENT | 400 | Payout exceeds maximum | Reduce stake |
-| ERR-DF-T1F | INVALID_ARGUMENT | 400 | Pricing time in future | Use current or past time |
-| ERR-DF-R1S | INVALID_ARGUMENT | 400 | Missing start_time | Provide start_time for Bid |
-| ERR-DF-R2P | INVALID_ARGUMENT | 400 | Missing payout | Provide payout for Bid |
-| ERR-DF-E1M | FAILED_PRECONDITION | 400 | Missing entry tick | Wait for market data |
-| ERR-DF-E2T | FAILED_PRECONDITION | 400 | Missing evaluation tick | Wait for market data |
-| ERR-DF-M1E | UNAVAILABLE | 503 | Market data unavailable | Retry with backoff |
-| ERR-DF-M2R | UNAVAILABLE | 503 | Market stream interrupted | Reconnect stream |
-| ERR-DF-I1X | INTERNAL | 500 | Internal server error | Contact support |
-
-### Error Handling Best Practices
-
-**For INVALID_ARGUMENT errors:**
-- Do not retry automatically
-- Fix request parameters and retry
-
-**For FAILED_PRECONDITION errors:**
-- May retry after waiting for precondition to be met
-- Check market data availability
-
-**For UNAVAILABLE errors:**
-- Retry with exponential backoff
-- Maximum 3 retries recommended
-- Consider circuit breaker pattern
-
-**For INTERNAL errors:**
-- Log error details
-- Alert operations team
-- May retry with caution
-
----
-
-## Service Discovery
-
-### Kubernetes Service Configuration
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: service-pricer-doublerisefall
-  namespace: default
-  labels:
-    app: service-pricer-doublerisefall
-spec:
-  type: ClusterIP
-  ports:
-    - name: grpc
-      port: 50051
-      targetPort: 50051
-      protocol: TCP
-  selector:
-    app: service-pricer-doublerisefall
-```
-
-### Health Check
-
-The service implements the standard gRPC health check protocol:
+All errors use standard gRPC status codes with error details in the `google.rpc.Status` message.
 
 ```protobuf
-service Health {
-  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
-  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+// Error details included in gRPC status
+message ErrorDetail {
+  string code = 1;                        // Error code (e.g., "ERR-DR-S1V")
+  string message = 2;                     // Human-readable message
+  map<string, string> metadata = 3;       // Additional context
 }
 ```
 
-### Environment Variables
+### Error Codes
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GRPC_PORT` | gRPC server port | 50051 |
-| `FEED_SERVICE_ADDR` | service-feed address | service-feed:50051 |
-| `CONFIG_PATH` | Path to symbol config | /config/symbols.yaml |
-| `LOG_LEVEL` | Logging level | info |
+| Error ID | gRPC Status | Code | Description | Client Action |
+|----------|-------------|------|-------------|---------------|
+| `ERR-DR-S1V` | `INVALID_ARGUMENT` | `INVALID_SYMBOL` | Symbol not supported | Check supported symbols list |
+| `ERR-DR-D2U` | `INVALID_ARGUMENT` | `INVALID_DURATION` | Invalid duration format | Fix duration format |
+| `ERR-DR-D3O` | `INVALID_ARGUMENT` | `DURATION_ORDER_INVALID` | second_duration ≤ first_duration | Ensure t2 > t1 |
+| `ERR-DR-D4G` | `INVALID_ARGUMENT` | `DURATION_GAP_INVALID` | Gap < 10s (time) or < 2 ticks | Increase duration gap |
+| `ERR-DR-K5S` | `INVALID_ARGUMENT` | `INVALID_STAKE` | Stake below minimum | Increase stake to ≥ 1.00 |
+| `ERR-DR-P6X` | `INVALID_ARGUMENT` | `PAYOUT_EXCEEDED` | Payout exceeds maximum | Reduce stake |
+| `ERR-DR-T2F` | `INVALID_ARGUMENT` | `PRICING_TIME_FUTURE` | Future pricing time not allowed | Use current or past time |
+| `ERR-DR-Y7D` | `FAILED_PRECONDITION` | `SYMBOL_DISABLED` | Symbol trading disabled | Choose different symbol |
+| `ERR-DR-E3T` | `FAILED_PRECONDITION` | `MISSING_ENTRY_TICK` | No tick at entry/evaluation time | Wait for market data |
+| `ERR-DR-M8E` | `UNAVAILABLE` | `MARKET_DATA_ERROR` | Cannot fetch market data | Retry with exponential backoff |
+| `ERR-DR-C1D` | `UNAVAILABLE` | `STREAM_DISCONNECTED` | Stream connection lost | Reconnect and resume |
+| `ERR-DR-T1M` | `INVALID_ARGUMENT` | `MISSING_START_TIME` | start_time required for Bid | Provide start_time |
+| `ERR-DR-P2Y` | `INVALID_ARGUMENT` | `MISSING_PAYOUT` | payout required for Bid | Provide original payout |
+| `ERR-DR-C2T` | `INVALID_ARGUMENT` | `INVALID_CONTRACT_TYPE` | Invalid contract type | Use RISE or FALL |
+| `ERR-DR-C3U` | `INVALID_ARGUMENT` | `INVALID_CURRENCY` | Unsupported currency | Use supported currency |
+| `ERR-DR-I9N` | `INTERNAL` | `INTERNAL_ERROR` | Unexpected server error | Contact support |
 
-### Connection Configuration
+### Stream Error Behavior
 
-**Recommended client configuration:**
-
-```go
-conn, err := grpc.Dial(
-    "service-pricer-doublerisefall:50051",
-    grpc.WithInsecure(), // or grpc.WithTransportCredentials(creds)
-    grpc.WithKeepaliveParams(keepalive.ClientParameters{
-        Time:                10 * time.Second,
-        Timeout:             3 * time.Second,
-        PermitWithoutStream: true,
-    }),
-)
-```
+| Scenario | Behavior |
+|----------|----------|
+| Validation error | Terminate stream with error status immediately |
+| Market data disconnect | Send error, attempt reconnect (3 retries), terminate if failed |
+| Server shutdown | Graceful termination with `UNAVAILABLE` status |
+| Client cancellation | Clean stream termination |
 
 ---
 
-## SLA & Reliability
+## Service Level Agreements
 
-### Performance Targets
+### Performance Requirements
 
-| Metric | Target | Notes |
-|--------|--------|-------|
-| GetAsk latency (p50) | < 20ms | Excluding network |
-| GetAsk latency (p99) | < 50ms | Excluding network |
-| StreamAsk update latency | < 100ms | From tick to client |
-| GetBid latency (p99) | < 100ms | May require multiple feed calls |
-| Concurrent streams | 1000 | Per instance |
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| **Latency (P50)** | < 5ms | Unary calls |
+| **Latency (P99)** | < 10ms | Unary calls |
+| **Stream Setup** | < 50ms | Time to first message |
+| **Availability** | 99.9% | Monthly uptime |
+| **Error Rate** | < 0.1% | Non-validation errors |
 
-### Availability
+### Rate Limiting
 
-| Metric | Target |
-|--------|--------|
-| Uptime | 99.9% |
-| Recovery time | < 30s |
+| Consumer | Limit | Window |
+|----------|-------|--------|
+| `api-gateway-trading` | 10,000 requests/second | Per service instance |
 
-### Capacity
+### Timeouts
 
-| Metric | Capacity |
-|--------|----------|
-| Requests per second | 10,000 |
-| Active streams | 1,000 per instance |
-| Memory usage | < 500MB |
+| Operation | Timeout |
+|-----------|---------|
+| Unary call | 5 seconds |
+| Stream keepalive | 30 seconds |
+| Connection establishment | 10 seconds |
+
+---
+
+## Proto Definition Reference
+
+The complete proto definition is located at:
+[`workspace/code/service-pricer-doublerisefall/api/proto/doublerisefall/v1/doublerisefall.proto`](../../../code/service-pricer-doublerisefall/api/proto/doublerisefall/v1/doublerisefall.proto)
 
 ---
 
 ## Changelog
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0.0 | 2026-01-15 | Initial internal API specification |
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 1.0.1 | 2026-01-15 | AI Generated | Added missing error code `ERR-DR-T2F` (PRICING_TIME_FUTURE) per Product Brief §7.2 |
+| 1.0.0 | 2026-01-15 | AI Generated | Initial API specification |
 
 ---
 
-## Quality Checklist
-
-- [x] All required capabilities from Inter-Service Communication Matrix addressed
-- [x] Authentication/authorization clearly defined (internal, no auth required)
-- [x] Base configuration complete (gRPC, package, port)
-- [x] Endpoint table provides quick reference
-- [x] Each endpoint has complete documentation
-- [x] Data models are comprehensive (OptionParameters, ContractType, Limits)
-- [x] Error handling standardized with unique error codes
-- [x] Service discovery documented (Kubernetes, health check)
-- [x] SLAs and reliability guarantees documented
-- [x] API follows consistent design principles
-- [x] No functionality is duplicated
-- [x] Service boundaries respected
+> **Document Version**: 1.0.1
+> **Last Updated**: 2026-01-15

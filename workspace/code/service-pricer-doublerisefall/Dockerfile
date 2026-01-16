@@ -17,34 +17,36 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /doublerisefall ./cmd/doublerisefall
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o doublerisefall ./cmd/doublerisefall
 
 # Runtime stage
 FROM alpine:3.19
 
-# Install ca-certificates for HTTPS calls
+# Install ca-certificates for HTTPS
 RUN apk --no-cache add ca-certificates
 
-# Create app directory
+# Create non-root user
+RUN addgroup -g 1000 app && \
+    adduser -D -u 1000 -G app app
+
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /doublerisefall ./doublerisefall
+COPY --from=builder /app/doublerisefall .
+COPY --from=builder /app/config/symbols.yml ./config/
 
-# Copy configuration
-COPY config/symbols.yaml ./config/symbols.yaml
+# Change ownership
+RUN chown -R app:app /app
+
+# Switch to non-root user
+USER app
 
 # Expose gRPC port
 EXPOSE 50051
 
-# Set default environment variables
-ENV GRPC_PORT=50051
-ENV CONFIG_PATH=./config/symbols.yaml
-ENV LOG_LEVEL=info
-
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:50051/health || exit 1
+  CMD nc -z localhost 50051 || exit 1
 
 # Run the application
-ENTRYPOINT ["/app/doublerisefall"]
+ENTRYPOINT ["./doublerisefall"]

@@ -1,136 +1,204 @@
-# service-pricer-doublerisefall
+# Double Rise/Fall Pricing Service
 
-A specialized pricing engine for the Double Rise/Fall digital binary option product. This service implements path-dependent contract pricing that evaluates spot prices against a barrier at two distinct timestamps (t1 and t2).
+Internal gRPC service for calculating Double Rise/Fall binary options contract prices.
+
+## Overview
+
+The Double Rise/Fall Pricing Service implements a closed-form analytical pricing model using bivariate normal distribution to determine fair probabilities for path-dependent contracts that require spot price to breach a barrier at two distinct evaluation times (t1 and t2).
 
 ## Features
 
-- **Real-time Pricing**: Calculate ask prices based on fair probability and commission
-- **Contract Valuation**: Evaluate bid prices for active contracts
-- **Streaming Support**: Real-time price updates via gRPC streaming
-- **Path-Dependent Logic**: Win/loss evaluation at two time points (t1 and t2)
-- **Flexible Durations**: Support for both time-based (s, m, h, d) and tick-based (t) durations
-- **Hot-Reload Configuration**: Symbol configuration updates without restart
+- **Ask Price Calculation**: Calculate contract purchase price (stake to payout ratio)
+- **Bid Price Calculation**: Value active contracts and determine win/loss at expiry
+- **Real-time Streaming**: Continuous price updates via gRPC streams
+- **Duration Support**: Both time-based (s/m/h/d) and tick-based (t) durations
+- **Symbol Configuration**: Per-symbol commission rates and limits
 
 ## Architecture
 
-The service follows a modular architecture with clear separation of concerns:
+### Dependency Direction
 
 ```
-grpcsvc → pricer → (config, feed, contract)
+grpcsvc (entry point)
+    ↓
+pricer (core logic, defines interfaces)
+    ↑ implements
+    ├── contract (validation)
+    ├── config (configuration)
+    └── feed (market data)
 ```
 
-### Internal Packages
+### Components
 
-- **pricer**: Core pricing logic, defines interfaces for dependencies
-- **grpcsvc**: gRPC handlers and streaming implementation
-- **config**: Symbol configuration management with hot-reload
+- **pricer**: Core pricing logic implementing bivariate normal formula
 - **contract**: Duration parsing and validation
+- **config**: Symbol configuration management from YAML
 - **feed**: Wrapper for service-feed client
-- **app**: Application initialization and dependency wiring
+- **grpcsvc**: gRPC handlers (thin layer)
+- **app**: Dependency injection and lifecycle management
 
 ## Prerequisites
 
 - Go 1.21 or higher
 - Access to `service-feed` for market data
-- Protocol Buffers compiler (for development)
+- Protocol Buffer compiler and Go plugins
 
-## Installation
+## Configuration
 
-### Build from Source
+Configuration is loaded from `config/symbols.yml`:
+
+```yaml
+symbols:
+  R_100:
+    commission: 0.05
+    max_payout: 1000.00
+    min_stake: 1.00
+    enabled: true
+```
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and configure:
 
 ```bash
-# Clone the repository
-git clone github.com/regentmarkets/service-pricer-doublerisefall
-cd service-pricer-doublerisefall
+# Required
+GRPC_PORT=50051
+FEED_SERVICE_ADDR=service-feed:50051
+CONFIG_PATH=config/symbols.yml
 
-# Download dependencies
-go mod download
+# Optional
+LOG_LEVEL=info
+```
 
-# Generate protobuf code
-make proto
+## Building
 
-# Build the application
+### Local Build
+
+```bash
+# Build binary
 make build
+
+# Run tests
+make test
+
+# Run with coverage
+make test-coverage
+```
+
+### Docker Build
+
+```bash
+make docker-build
+```
+
+## Running
+
+### Local Development
+
+```bash
+# Set environment variables
+export FEED_SERVICE_ADDR=localhost:50051
+export CONFIG_PATH=config/symbols.yml
+
+# Run service
+make run
 ```
 
 ### Docker
 
 ```bash
-# Build Docker image
-docker build -t service-pricer-doublerisefall:latest .
-
-# Run container
 docker run -p 50051:50051 \
   -e FEED_SERVICE_ADDR=service-feed:50051 \
+  -e CONFIG_PATH=config/symbols.yml \
   service-pricer-doublerisefall:latest
 ```
 
-## Configuration
+## API
 
-### Environment Variables
+### gRPC Endpoints
 
-See [`.env.example`](.env.example) for all available configuration options:
+| Method | Type | Description |
+|--------|------|-------------|
+| `GetAsk` | Unary | Calculate contract purchase price |
+| `StreamAsk` | Server Stream | Real-time price updates |
+| `GetBid` | Unary | Value active contract |
+| `StreamBid` | Server Stream | Real-time contract valuation |
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GRPC_PORT` | gRPC server port | 50051 |
-| `FEED_SERVICE_ADDR` | service-feed address | service-feed:50051 |
-| `CONFIG_PATH` | Path to symbols.yaml | ./config/symbols.yaml |
-| `LOG_LEVEL` | Logging level (debug, info, warn, error) | info |
-| `FEED_RETRY_ATTEMPTS` | Feed service retry attempts | 3 |
-| `FEED_RETRY_DELAY_MS` | Retry delay in milliseconds | 1000 |
+### Proto Definition
 
-### Symbol Configuration
+See [`api/proto/doublerisefall/v1/doublerisefall.proto`](api/proto/doublerisefall/v1/doublerisefall.proto)
 
-Edit [`config/symbols.yaml`](config/symbols.yaml) to configure trading parameters per symbol:
-
-```yaml
-symbols:
-  R_100:
-    symbol: R_100
-    commission_rate: 0.05    # 5% commission
-    max_payout: 1000.00      # Maximum payout limit
-    min_stake: 1.00          # Minimum stake requirement
-    enabled: true            # Enable/disable trading
-```
-
-## Usage
-
-### Running Locally
+### Example Request
 
 ```bash
-# Set environment variables
-export FEED_SERVICE_ADDR=localhost:50051
-export CONFIG_PATH=./config/symbols.yaml
-
-# Run the service
-./bin/doublerisefall
+# Using grpcurl
+grpcurl -plaintext \
+  -d '{
+    "option_parameters": {
+      "symbol": "R_100",
+      "contract_type": "CONTRACT_TYPE_RISE",
+      "currency": "USD",
+      "first_duration": "1m",
+      "second_duration": "2m",
+      "stake": "10.00"
+    }
+  }' \
+  localhost:50051 \
+  doublerisefall.v1.DoubleRiseFallService/GetAsk
 ```
 
-### API Endpoints
+## Pricing Formula
 
-The service exposes 4 gRPC endpoints:
+**Fair Probability**:
+```
+P_fair = 1/4 + arcsin(√(t1/t2)) / (2π)
+```
 
-1. **GetAsk**: Calculate single contract price
-2. **StreamAsk**: Stream real-time contract prices
-3. **GetBid**: Evaluate current contract value
-4. **StreamBid**: Stream real-time contract values
+**Client Price (Ask)**:
+```
+P_client = P_fair + commission
+```
 
-See [API documentation](proto/doublerisefall/v1/doublerisefall.proto) for detailed request/response schemas.
+**Payout**:
+```
+Payout = Stake / P_client
+```
 
 ## Development
 
-### Running Tests
+### Project Structure
+
+```
+.
+├── api/                    # Generated proto code
+├── cmd/doublerisefall/     # Main entry point
+├── config/                 # Configuration files
+├── internal/
+│   ├── app/               # Application lifecycle
+│   ├── config/            # Config management
+│   ├── contract/          # Validation
+│   ├── feed/              # Market data client
+│   ├── grpcsvc/           # gRPC handlers
+│   └── pricer/            # Core pricing logic
+├── Dockerfile
+├── Makefile
+└── README.md
+```
+
+### Testing
 
 ```bash
 # Run all tests
 make test
 
-# Run tests with coverage
-make test-coverage
+# Run with race detector
+go test -race ./...
+
+# Run specific package tests
+go test ./internal/pricer/...
 ```
 
-### Code Quality
+### Code Style
 
 ```bash
 # Format code
@@ -140,55 +208,50 @@ make fmt
 make lint
 ```
 
-### Proto Generation
-
-```bash
-# Regenerate protobuf code
-make proto
-```
-
-## Pricing Formula
-
-The service uses the arcsin correlation formula for fair probability calculation:
-
-**Correlation**: ρ = √(t₁/t₂)
-
-**Fair Probability**: P_fair = 1/4 + arcsin(ρ)/(2π)
-
-**Client Price**: P_client = P_fair + Commission
-
-**Payout**: Payout = Stake / P_client
-
-## Win/Loss Conditions
-
-### RISE Contract
-- **Win**: spot_t1 > barrier AND spot_t2 > barrier
-- **Loss**: spot_t1 ≤ barrier OR spot_t2 ≤ barrier
-
-### FALL Contract
-- **Win**: spot_t1 < barrier AND spot_t2 < barrier
-- **Loss**: spot_t1 ≥ barrier OR spot_t2 ≥ barrier
-
-**Note**: If the condition fails at t1, the contract expires worthless immediately (short-circuit evaluation).
-
 ## Health Check
 
-The service implements the standard gRPC health check protocol:
+The service implements gRPC health check protocol:
 
 ```bash
 grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
 ```
 
+## Monitoring
+
+The service logs structured JSON output using `slog`:
+
+- **Debug**: Detailed operation logs
+- **Info**: Normal operation events
+- **Error**: Error conditions
+
+Set `LOG_LEVEL` environment variable to control verbosity.
+
+## Error Handling
+
+All errors use standard gRPC status codes with descriptive error codes:
+
+| Error Code | gRPC Status | Description |
+|------------|-------------|-------------|
+| `ERR-DR-S1V` | `INVALID_ARGUMENT` | Invalid symbol |
+| `ERR-DR-D2U` | `INVALID_ARGUMENT` | Invalid duration format |
+| `ERR-DR-M8E` | `UNAVAILABLE` | Market data unavailable |
+| `ERR-DR-I9N` | `INTERNAL` | Internal error |
+
+See API specification for complete error code list.
+
 ## Dependencies
 
-- **service-feed**: Market data provider (required)
-- **google.golang.org/grpc**: gRPC framework
-- **github.com/spf13/viper**: Configuration management
+- **service-feed**: Market data (critical)
+- **google.golang.org/grpc**: gRPC implementation
+- **gopkg.in/yaml.v3**: Configuration parsing
+
+## Contributing
+
+1. Follow Go standard project layout
+2. Write tests for new features
+3. Update documentation
+4. Ensure all tests pass before submitting
 
 ## License
 
-Copyright © 2026 Regent Markets
-
-## Support
-
-For issues or questions, contact the development team.
+Internal service - Regent Markets Group

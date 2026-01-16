@@ -1,0 +1,107 @@
+# Docker Compose for Double Rise/Fall Pricing Service Integration
+#
+# This configuration sets up the service-pricer-doublerisefall service
+# along with its dependency service-feed (mocked for local development).
+#
+# Usage:
+#   docker compose up -d              # Start all services
+#   docker compose logs -f            # Follow logs
+#   docker compose down               # Stop all services
+#   docker compose down -v            # Stop and remove volumes
+
+networks:
+  app-network:
+    driver: bridge
+    name: doublerisefall-network
+
+services:
+  # =============================================================================
+  # Mock Service: service-feed
+  # =============================================================================
+  # In production, service-feed is an external dependency.
+  # For local development, we use a mock service that provides simulated tick data.
+  # Replace with actual service-feed image when available.
+  service-feed:
+    image: alpine:3.19
+    container_name: service-feed-mock
+    command: >
+      sh -c "
+        echo 'Mock service-feed starting...'
+        echo 'Listening on port 50051 (mock mode - no actual gRPC server)'
+        echo 'For integration testing, replace with actual service-feed image'
+        tail -f /dev/null
+      "
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "echo", "healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    labels:
+      - "app.component=dependency"
+      - "app.mock=true"
+      - "app.description=Mock service-feed for local development"
+
+  # =============================================================================
+  # Main Service: service-pricer-doublerisefall
+  # =============================================================================
+  service-pricer-doublerisefall:
+    build:
+      context: ../service-pricer-doublerisefall
+      dockerfile: Dockerfile
+    container_name: service-pricer-doublerisefall
+    ports:
+      - "${GRPC_PORT:-50051}:50051"
+      - "${HEALTH_PORT:-8081}:8081"
+    environment:
+      - FEED_SERVICE_ADDR=${FEED_SERVICE_ADDR:-service-feed:50051}
+      - CONFIG_PATH=${CONFIG_PATH:-/app/config/symbols.yml}
+      - GRPC_PORT=${GRPC_PORT:-50051}
+      - HEALTH_PORT=${HEALTH_PORT:-8081}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      service-feed:
+        condition: service_healthy
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    labels:
+      - "app.component=service"
+      - "app.name=service-pricer-doublerisefall"
+      - "app.description=Double Rise/Fall Pricing Service"
+
+# =============================================================================
+# Notes for Production Integration
+# =============================================================================
+#
+# 1. Replace service-feed mock with actual service-feed:
+#    service-feed:
+#      image: regentmarkets/service-feed:latest
+#      ports:
+#        - "50052:50051"  # Different external port to avoid conflicts
+#      environment:
+#        - DATABASE_URL=...
+#
+# 2. For Kubernetes deployment, use the following readiness probe:
+#    readinessProbe:
+#      httpGet:
+#        path: /ready
+#        port: 8081
+#      initialDelaySeconds: 5
+#      periodSeconds: 10
+#
+# 3. For liveness probe:
+#    livenessProbe:
+#      httpGet:
+#        path: /health
+#        port: 8081
+#      initialDelaySeconds: 15
+#      periodSeconds: 20

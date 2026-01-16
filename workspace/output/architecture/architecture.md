@@ -1,285 +1,296 @@
-# Service Architecture: service-pricer-doublerisefall
+# Service Architecture: Double Rise/Fall Pricing Service
 
-> **Version**: 1.1.0
+> **Version**: 1.0.0
+> **Status**: Draft
 > **Created**: 2026-01-15
-> **Status**: DRAFT - Second Iteration
+> **Mode**: New
 
 ---
 
 ## Executive Summary
 
-This document defines the service architecture for `service-pricer-doublerisefall`, a specialized pricing engine for the Double Rise/Fall digital binary option product. The service implements a path-dependent contract pricing model that evaluates spot prices against a barrier at two distinct timestamps (t1 and t2).
+This document defines the service architecture for the **Double Rise/Fall Pricing Service** (`service-pricer-doublerisefall`), an internal gRPC service that calculates contract prices for Double Rise/Fall binary options. The service implements a closed-form analytical pricing model using bivariate normal distribution to determine fair probabilities for path-dependent contracts.
 
-The architecture follows a single-service design pattern optimized for focused pricing calculations, with clear internal module boundaries following the service template guide conventions. The service depends solely on `service-feed` for market data and uses local YAML configuration for symbol-specific settings.
+### Key Architectural Decisions
 
-**Key Architectural Decisions**:
-- Single service with modular internal structure
-- gRPC as primary communication protocol
-- Dependency direction: grpcsvc → pricer → (config, feed, contract)
-- Interfaces defined where consumed (in pricer package)
-- Stateless design with configuration loaded at startup
+| Decision | Rationale |
+|----------|-----------|
+| **Single Service Architecture** | Product scope is focused on one derivative product type with clear boundaries |
+| **gRPC-Only Protocol** | Internal service consumed only by `api-gateway-trading`, no REST required |
+| **Light Modular Organization** | Complexity score 6/10 warrants organized components without over-engineering |
+| **Interface-at-Consumer Pattern** | Interfaces defined where consumed (in `pricer` package) per service template guide |
+
+### Service Boundaries
+
+The service operates within clear boundaries:
+- **Owns**: Pricing logic, contract validation, duration parsing, configuration management
+- **Depends On**: Market data from `service-feed`
+- **Consumed By**: `api-gateway-trading`
 
 ---
 
 ## Service Architecture Overview
 
-### High-Level View
+### High-Level Architecture
 
 ```mermaid
 graph TB
-    subgraph External["External Systems"]
-        AGW[api-gateway-trading]
+    subgraph "External Consumer"
+        AGT[api-gateway-trading]
+    end
+    
+    subgraph "service-pricer-doublerisefall"
+        GRPC[gRPC Service Layer<br/>grpcsvc]
+        PRICER[Pricing Engine<br/>pricer]
+        CONTRACT[Contract Manager<br/>contract]
+        CONFIG[Config Manager<br/>config]
+        FEED[Feed Client<br/>feed]
+    end
+    
+    subgraph "External Dependency"
         SF[service-feed]
     end
     
-    subgraph Service["service-pricer-doublerisefall"]
-        GRPC[grpcsvc<br/>gRPC Handlers]
-        PRICER[pricer<br/>Core Pricing Logic]
-        CONFIG[config<br/>Symbol Settings]
-        FEED[feed<br/>Market Data Wrapper]
-        CONTRACT[contract<br/>Validation & Lifecycle]
-    end
-    
-    AGW -->|gRPC| GRPC
+    AGT -->|gRPC| GRPC
     GRPC --> PRICER
-    PRICER -.->|ConfigProvider| CONFIG
-    PRICER -.->|FeedProvider| FEED
-    PRICER -.->|ContractValidator| CONTRACT
+    PRICER -.->|interface| CONTRACT
+    PRICER -.->|interface| CONFIG
+    PRICER -.->|interface| FEED
     FEED -->|gRPC| SF
-    
-    style PRICER fill:#e1f5fe
-    style GRPC fill:#fff3e0
-    style CONFIG fill:#f3e5f5
-    style FEED fill:#e8f5e9
-    style CONTRACT fill:#fce4ec
 ```
 
-### Architectural Principles
+### Component Dependency Direction
 
-| Principle | Application |
-|-----------|-------------|
-| **Single Responsibility** | One service per product type (Double Rise/Fall) |
-| **Dependency Inversion** | Pricer defines interfaces, other packages implement |
-| **Interface Segregation** | Minimal interfaces (ConfigProvider, FeedProvider) |
-| **Stateless Design** | All state passed via request, config loaded at startup |
-| **Clean Boundaries** | gRPC handlers delegate to business logic, no data assembly |
+Per the service template guide, dependencies flow toward the core pricing logic:
+
+```mermaid
+graph TD
+    grpcsvc["grpcsvc<br/>(entry point)"]
+    pricer["pricer<br/>(core logic, defines interfaces)"]
+    contract["contract<br/>(implements validation)"]
+    config["config<br/>(implements config provider)"]
+    feed["feed<br/>(implements feed provider)"]
+    
+    grpcsvc --> pricer
+    contract -.->|implements| pricer
+    config -.->|implements| pricer
+    feed -.->|implements| pricer
+```
 
 ### Technology Stack
 
-| Component | Technology | Rationale |
-|-----------|------------|-----------|
-| **Language** | Go 1.21+ | Performance, gRPC support, type safety |
-| **API Protocol** | gRPC + Protocol Buffers | Type-safe contracts, streaming support |
-| **Configuration** | YAML + Viper | Human-readable, hot-reload capable |
-| **Logging** | slog (structured) | Standard library, structured output |
-| **Build** | Makefile + buf | Reproducible builds, proto generation |
+| Layer | Technology | Justification |
+|-------|------------|---------------|
+| **Protocol** | gRPC/Protocol Buffers | High-performance binary protocol for internal services |
+| **Language** | Go 1.21+ | Team standard, excellent concurrency support |
+| **Configuration** | YAML + Viper | Flexible configuration with hot-reload capability |
+| **Logging** | slog | Go standard library structured logging |
+| **Build** | buf | Modern protobuf toolchain |
 
 ---
 
-## Service Definitions
+## Service Definition
 
-### Service: doublerisefall
+### Service ID
+`SVC-DRF-P1C`
 
-| Field | Value |
-|-------|-------|
-| **Service ID** | SVC-DRF-P7K |
-| **Service Name** | `doublerisefall` |
-| **Repository** | `github.com/regentmarkets/service-pricer-doublerisefall` |
-| **Package** | `doublerisefall.v1` |
+### Service Name
+`doublerisefall` (used in paths: `service-pricer-doublerisefall`)
 
-#### Purpose
+### Purpose
+Calculate ask (purchase) and bid (valuation) prices for Double Rise/Fall binary options contracts. The service evaluates path-dependent contracts that require spot price to breach barrier at two distinct evaluation times (t1 and t2) for a winning outcome.
 
-The Double Rise/Fall pricing service calculates contract prices (Ask) and evaluates contract values (Bid) for path-dependent binary options. It implements a closed-form analytical pricing model using bivariate normal distribution with arcsin correlation, providing real-time and streaming price updates to the trading gateway.
+### Domain Alignment
+**Single Bounded Context**: Derivatives Pricing Domain
+- Contract specification and validation
+- Fair probability calculation  
+- Commission and payout computation
+- Contract lifecycle evaluation
 
-#### Domain Alignment
-
-| Bounded Context | Coverage |
-|-----------------|----------|
-| **Contract Pricing** | Full - Ask price calculation, payout computation |
-| **Contract Valuation** | Full - Bid price evaluation, win/loss determination |
-| **Market Data** | Partial - Consumes via service-feed, no ownership |
-
-#### Business Capabilities
+### Business Capabilities
 
 | Capability | Description |
 |------------|-------------|
-| **BC-001** | Calculate contract ask price (payout) based on stake and fair probability |
-| **BC-002** | Apply commission to fair probability for client pricing |
-| **BC-003** | Evaluate contract bid price based on win/loss conditions at t1 and t2 |
-| **BC-004** | Stream real-time ask prices on tick updates |
-| **BC-005** | Stream real-time bid prices for active contracts |
-| **BC-006** | Validate contract parameters (symbol, duration, stake) |
-| **BC-007** | Enforce trading limits (max payout, min stake) |
+| **Ask Price Calculation** | Compute contract purchase price (stake to payout ratio) |
+| **Bid Price Calculation** | Determine current value of active contracts |
+| **Real-time Price Streaming** | Provide continuous price updates via gRPC streams |
+| **Duration Validation** | Support both time-based (s/m/h/d) and tick-based (t) durations |
+| **Symbol Configuration** | Manage per-symbol commission rates and limits |
 
-#### Data Domains
+### Data Domains
 
 | Entity | Ownership | Description |
 |--------|-----------|-------------|
-| **Symbol Configuration** | Owned | Commission rates, payout limits, stake limits per symbol |
-| **Contract Parameters** | Transient | Request-scoped contract specifications |
-| **Tick Data** | External | Consumed from service-feed, not persisted |
+| **Contract** | Owned | Request/response domain object representing pricing request |
+| **Duration** | Owned | Parsed duration with unit discriminator |
+| **SymbolConfig** | Owned | Per-symbol configuration (commission, limits) |
+| **Tick** | Referenced | Market data from `service-feed`, wrapped locally |
 
-#### Public API
+### Public API
 
-The service exposes a gRPC API to `api-gateway-trading`:
+This service has **no public API**. It is an internal service consumed only by other backend services.
 
+### Internal API (gRPC)
+
+Defined in [`proto/doublerisefall/v1/doublerisefall.proto`](workspace/code/service-pricer-doublerisefall/api/proto/doublerisefall/v1/doublerisefall.proto):
+
+| RPC Method | Type | Request | Response | Purpose |
+|------------|------|---------|----------|---------|
+| `GetAsk` | Unary | `GetAskRequest` | `GetAskResponse` | Single contract price calculation |
+| `StreamAsk` | Server Stream | `StreamAskRequest` | `stream GetAskResponse` | Real-time price updates |
+| `GetBid` | Unary | `GetBidRequest` | `GetBidResponse` | Active contract valuation |
+| `StreamBid` | Server Stream | `StreamBidRequest` | `stream GetBidResponse` | Real-time contract valuation |
+
+#### Message Definitions
+
+**Request Messages**:
 ```protobuf
-service DoubleRiseFallService {
-  // Request a single contract price (Ask)
-  rpc GetAsk (GetAskRequest) returns (GetAskResponse);
-  
-  // Stream contract prices (Ask Stream)
-  rpc StreamAsk (StreamAskRequest) returns (stream GetAskResponse);
-  
-  // Request value of an active contract (Bid)
-  rpc GetBid (GetBidRequest) returns (GetBidResponse);
-  
-  // Stream value of an active contract
-  rpc StreamBid (StreamBidRequest) returns (stream GetBidResponse);
+message OptionParameters {
+  string symbol = 1;                    // e.g., "R_100"
+  ContractType contract_type = 2;       // RISE or FALL
+  string currency = 3;                  // e.g., "USD"
+  string first_duration = 4;            // e.g., "1m", "30s", "5t"
+  string second_duration = 5;           // e.g., "2m", "60s", "10t"
+  optional int64 start_time = 6;        // Required for Bid
+  string stake = 7;                     // Premium amount
+  optional string payout = 8;           // Required for Bid (from Ask)
+}
+
+message GetAskRequest {
+  OptionParameters option_parameters = 1;
+  optional int64 pricing_time = 2;
 }
 ```
 
-| Operation | Input | Output | Description |
-|-----------|-------|--------|-------------|
-| **GetAsk** | OptionParameters + pricing_time | ask_price, payout, limits | Single ask price calculation |
-| **StreamAsk** | OptionParameters + pricing_time | Stream of ask prices | Real-time ask updates |
-| **GetBid** | OptionParameters (with payout) + pricing_time | bid_price, is_expired, spots | Single bid evaluation |
-| **StreamBid** | OptionParameters (with payout) + pricing_time | Stream of bid prices | Real-time bid updates |
+**Response Messages**:
+```protobuf
+message GetAskResponse {
+  string ask_price = 1;      // Contract price
+  string currency = 2;
+  string current_spot = 3;
+  int64 current_spot_time = 4;
+  string payout = 5;         // Potential payout
+  Limits limits = 6;
+}
 
-#### Internal API
+message GetBidResponse {
+  string bid_price = 1;      // Current value (0, payout, or error)
+  bool is_expired = 2;
+  string current_spot = 3;
+  int64 current_spot_time = 4;
+  string entry_spot = 5;     // Barrier
+  int64 entry_spot_time = 6;
+  string exit_spot = 7;
+  int64 exit_spot_time = 8;
+  string barrier = 9;
+  int64 start_time = 10;
+  int64 expiry_time = 11;
+  string currency = 12;
+  int64 evaluation_time = 13; // t1
+}
+```
 
-Not applicable - this service does not provide APIs to other internal services. It is a leaf service consumed only by the trading gateway.
+### Dependencies
 
-#### Dependencies
+| Dependency | Type | Protocol | Purpose | Criticality |
+|------------|------|----------|---------|-------------|
+| `service-feed` | External Service | gRPC | Market data (spot prices, ticks) | **Critical** |
 
-| Service | Purpose | Protocol | Criticality | Notes |
-|---------|---------|----------|-------------|-------|
-| **service-feed** | Market data (spot prices, tick history) | gRPC | Critical | Compatible with client v1.x |
+### Requirements from service-feed
 
-> **⚠️ MANDATORY**: Import and use `github.com/regentmarkets/service-feed/client` - do NOT implement direct gRPC calls. See [`service-feed.md`](../../dependency/service-feed.md).
+Based on [`workspace/dependency/service-feed.md`](workspace/dependency/service-feed.md), the following capabilities are required:
 
-#### Key Responsibilities
+| Method | Signature | Use Case |
+|--------|-----------|----------|
+| [`GetTickForEpoch`](workspace/code/service-feed/client/client.go:80) | `(ctx, symbol, epoch) (*Tick, bool, error)` | Entry tick, spot at t1/t2 |
+| [`GetTicksFromLimit`](workspace/code/service-feed/client/client.go:98) | `(ctx, symbol, start, limit) ([]*Tick, bool, error)` | Tick-based contracts |
+| [`Subscribe`](workspace/code/service-feed/client/client.go:146) | `(ctx, symbol, start) *Subscription` | StreamAsk, StreamBid |
 
-| ID | Responsibility | Component |
-|----|----------------|-----------|
-| **R-001** | Parse and validate duration strings (s, m, h, d, t) | contract |
-| **R-002** | Validate duration constraints (t2 > t1, gap ≥ 10s or ≥ 2t) | contract |
-| **R-003** | Validate stake against symbol limits | contract |
-| **R-004** | Calculate fair probability using arcsin formula | pricer |
-| **R-005** | Apply commission to derive client price | pricer |
-| **R-006** | Calculate payout from stake and unit price | pricer |
-| **R-007** | Fetch current spot price for Ask | feed |
-| **R-008** | Fetch entry tick (barrier) for Bid | feed |
-| **R-009** | Fetch evaluation ticks at t1 and t2 | feed |
-| **R-010** | Evaluate RISE win condition (spot > barrier at t1 AND t2) | pricer |
-| **R-011** | Evaluate FALL win condition (spot < barrier at t1 AND t2) | pricer |
-| **R-012** | Return payout (win) or 0 (loss) as bid price | pricer |
-| **R-013** | Stream ask prices on tick updates | grpcsvc |
-| **R-014** | Stream bid prices on tick updates (time-based: also every 5s) | grpcsvc |
-| **R-015** | Load and validate symbol configuration | config |
-| **R-016** | Return gRPC standard error codes | grpcsvc |
+**Integration Pattern**: Create thin wrapper around `service-feed/client` with interface defined in `pricer` package.
 
-#### User Stories Coverage
+### Key Responsibilities
 
-| Story ID | Summary | Addressed By |
-|----------|---------|--------------|
-| **US-001** | Trader requests contract price for display | GetAsk |
-| **US-002** | Trader streams live prices during trade setup | StreamAsk |
-| **US-003** | Trader purchases contract (uses Ask response) | GetAsk → external purchase |
-| **US-004** | System evaluates contract at expiry | GetBid |
-| **US-005** | Trader views live contract value | StreamBid |
-| **US-006** | System validates trade parameters | GetAsk validation |
-| **US-007** | Trader sees potential payout before purchase | GetAsk response.payout |
-| **US-008** | System enforces trading limits | GetAsk validation |
+1. **Duration Parsing**: Parse duration strings ("1m", "30s", "5t") into structured Duration objects with unit discriminator
+2. **Validation**: Validate all contract parameters against configuration rules
+3. **Fair Probability Calculation**: Implement bivariate normal formula: `P_fair = 0.25 + arcsin(√(t1/t2)) / (2π)`
+4. **Commission Application**: Add commission to fair probability for ask price
+5. **Payout Calculation**: `Payout = Stake / P_client` where `P_client = P_fair + commission`
+6. **Contract Evaluation**: For Bid, evaluate win/loss conditions at t1 and t2
+7. **Stream Management**: Handle real-time tick subscriptions with proper lifecycle
 
-#### Constraints
+### User Stories Coverage
 
-| Type | Constraint | Rationale |
-|------|------------|-----------|
-| **Performance** | GetAsk < 50ms p99 latency | Real-time trading requirement |
-| **Performance** | StreamAsk update < 100ms from tick | Competitive pricing |
-| **Availability** | 99.9% uptime | Trading hours critical |
-| **Consistency** | Payout fixed at purchase time | Contract integrity |
-| **Scalability** | Support 1000 concurrent streams | Peak trading load |
+| Story ID | Description | Implementation |
+|----------|-------------|----------------|
+| US-001 | As a trading gateway, I need to get contract prices for client display | `GetAsk` RPC |
+| US-002 | As a trading gateway, I need real-time price updates for live pricing | `StreamAsk` RPC |
+| US-003 | As a trading gateway, I need to value active contracts | `GetBid` RPC |
+| US-004 | As a trading gateway, I need real-time contract value updates | `StreamBid` RPC |
+| US-005 | As a trading gateway, I need validation errors with clear codes | gRPC status codes |
 
-#### Requirements from Other Services
+### Constraints
 
-| Service | Required Capability | Purpose |
-|---------|---------------------|---------|
-| **service-feed** | `GetTickForEpoch(symbol, epoch)` | Entry tick, spot at t1/t2 |
-| **service-feed** | `GetTicksFromLimit(symbol, start, limit)` | Tick-based contract evaluation |
-| **service-feed** | `Subscribe(symbol, start)` | Real-time tick streaming |
+| Constraint | Requirement |
+|------------|-------------|
+| **Latency** | < 10ms for unary calls under normal load |
+| **Streaming** | Update frequency: on tick OR every 5s (time-based), on tick only (tick-based) |
+| **Precision** | 4 decimal places for unit price, 2 for payout |
+| **Supported Symbols** | R_10, R_25, R_50, R_75, R_100 |
+| **Duration Limits** | Time: 10s-1day, Tick: 2-10 ticks |
+| **Duration Gap** | Minimum 10s (time) or 2 ticks (tick) between t1 and t2 |
 
-#### Internal Structure
+### Internal Structure
 
-The service follows the standard service template guide with light modular organization (Score 5 complexity):
+The service follows **light modular organization** (complexity score 6) with these components:
 
 ```
 service-pricer-doublerisefall/
-├── api/                           # Generated gRPC code (do not edit)
-│   └── doublerisefall/
-│       ├── doublerisefall.pb.go
-│       ├── doublerisefall_grpc.pb.go
-│       └── doublerisefall.pb.gw.go
-├── cmd/
-│   └── doublerisefall/
-│       └── main.go                # Application entry point
+├── cmd/doublerisefall/
+│   └── main.go              # Application entry point
 ├── config/
-│   └── symbols.yaml               # Symbol-specific configuration
+│   └── symbols.yml          # Symbol configuration
 ├── internal/
 │   ├── app/
-│   │   ├── app.go                 # Application initialization
-│   │   └── app_test.go
-│   ├── grpcsvc/
-│   │   ├── grpcsvc.go             # gRPC handlers (entry point)
-│   │   └── grpcsvc_test.go
-│   ├── pricer/
-│   │   ├── pricer.go              # Core pricing logic, defines interfaces
-│   │   ├── pricer_test.go
-│   │   ├── ask.go                 # Ask price calculation
-│   │   └── bid.go                 # Bid price evaluation
+│   │   └── app.go           # Application initialization, DI wiring
 │   ├── config/
-│   │   ├── config.go              # Configuration loading
+│   │   ├── config.go        # SymbolConfig, Manager
 │   │   └── config_test.go
 │   ├── contract/
-│   │   ├── contract.go            # Contract validation
-│   │   ├── contract_test.go
-│   │   └── duration.go            # Duration parsing
+│   │   ├── contract.go      # Duration, Contract, Validation
+│   │   └── contract_test.go
 │   ├── feed/
-│   │   ├── client.go              # Wrapper for service-feed
+│   │   ├── client.go        # Wrapper for service-feed client
 │   │   └── client_test.go
-│   └── tools/
-│       └── tools.go               # Build tool dependencies
-└── proto/
-    └── doublerisefall/
-        └── v1/
-            └── doublerisefall.proto  # API definition
+│   ├── grpcsvc/
+│   │   ├── grpcsvc.go       # gRPC handlers (thin layer)
+│   │   └── grpcsvc_test.go
+│   └── pricer/
+│       ├── pricer.go        # Core pricing logic, interfaces
+│       └── pricer_test.go
+└── proto/doublerisefall/v1/
+    └── doublerisefall.proto # Service API definition
 ```
 
-**Component Responsibilities**:
+#### Component Responsibilities
 
-| Component | Package | Responsibility |
-|-----------|---------|----------------|
-| **gRPC Handlers** | `internal/grpcsvc` | Request handling, response formatting, streaming |
-| **Pricer** | `internal/pricer` | Fair probability, commission, payout calculation, win/loss evaluation |
-| **Config** | `internal/config` | YAML loading, symbol configuration access |
-| **Contract** | `internal/contract` | Duration parsing, validation, lifecycle |
-| **Feed** | `internal/feed` | service-feed client wrapper |
+| Package | Responsibility | Interfaces Defined | Implements |
+|---------|---------------|-------------------|------------|
+| `grpcsvc` | gRPC handlers, request/response mapping | None | Proto service |
+| `pricer` | Pricing calculation, fair probability, commission | `ConfigProvider`, `FeedProvider`, `ContractValidator` | Core domain |
+| `contract` | Duration parsing, validation rules | None | `ContractValidator` |
+| `config` | Symbol configuration loading, hot-reload | None | `ConfigProvider` |
+| `feed` | Market data client wrapper | None | `FeedProvider` |
+| `app` | Application bootstrap, dependency injection | None | None |
 
-**Dependency Direction**:
-```
-grpcsvc → pricer → (config, feed, contract)
-```
+### Orchestration Requirements
 
-#### Orchestration Requirements
-
-| Requirement | Value |
-|-------------|-------|
-| **Startup Dependencies** | service-feed must be running |
-| **Health Check** | `/health` (gRPC health check protocol) |
-| **Port Allocation** | 50051 (gRPC), 8080 (HTTP gateway) |
-| **Database Requirements** | None - stateless service |
+| Aspect | Value |
+|--------|-------|
+| **Startup Dependencies** | `service-feed` must be reachable |
+| **Health Check** | gRPC health check protocol + `/health` HTTP endpoint |
+| **Port** | 50051 (gRPC), 8081 (HTTP health/metrics) |
 | **Environment Variables** | `FEED_SERVICE_ADDR`, `CONFIG_PATH`, `LOG_LEVEL` |
+| **Database** | None required |
 
 ---
 
@@ -287,321 +298,184 @@ grpcsvc → pricer → (config, feed, contract)
 
 ### Data Ownership
 
-| Data Type | Owner | Strategy |
-|-----------|-------|----------|
-| **Symbol Configuration** | service-pricer-doublerisefall | Local YAML, loaded at startup |
-| **Contract State** | api-gateway-trading | Not persisted in pricer |
-| **Market Data** | service-feed | Fetched on-demand |
+| Entity | Owner | Storage | Access Pattern |
+|--------|-------|---------|----------------|
+| **SymbolConfig** | This service | YAML file | Read at startup, hot-reload |
+| **Contract** | This service | In-memory (request scope) | Request/response only |
+| **Market Data** | `service-feed` | External | Read via gRPC |
 
 ### Data Flow
 
 ```mermaid
 sequenceDiagram
-    participant Client as api-gateway-trading
+    participant Gateway as api-gateway-trading
     participant Service as service-pricer-doublerisefall
     participant Feed as service-feed
     
-    Note over Client,Feed: Ask Flow
-    Client->>Service: GetAsk(symbol, stake, duration)
+    Note over Gateway,Feed: Ask Price Calculation
+    Gateway->>Service: GetAsk(symbol, durations, stake)
+    Service->>Service: Validate parameters
+    Service->>Service: Parse durations
     Service->>Feed: GetTickForEpoch(symbol, now)
-    Feed-->>Service: Tick(spot, time)
-    Service->>Service: Calculate probability
+    Feed-->>Service: Tick (current spot)
+    Service->>Service: Calculate fair probability
     Service->>Service: Apply commission
     Service->>Service: Calculate payout
-    Service-->>Client: AskResponse(price, payout)
+    Service-->>Gateway: AskResponse(price, payout, spot)
     
-    Note over Client,Feed: Bid Flow
-    Client->>Service: GetBid(symbol, start_time, payout)
+    Note over Gateway,Feed: Bid Price Calculation
+    Gateway->>Service: GetBid(symbol, durations, start_time, payout)
+    Service->>Service: Validate parameters
     Service->>Feed: GetTickForEpoch(symbol, start_time)
-    Feed-->>Service: Tick(entry_spot)
+    Feed-->>Service: Entry tick (barrier)
     Service->>Feed: GetTickForEpoch(symbol, t1)
-    Feed-->>Service: Tick(spot_t1)
-    Service->>Feed: GetTickForEpoch(symbol, t2)
-    Feed-->>Service: Tick(spot_t2)
-    Service->>Service: Evaluate win/loss
-    Service-->>Client: BidResponse(bid_price, is_expired)
+    Feed-->>Service: Tick at t1
+    alt Contract expired (past t2)
+        Service->>Feed: GetTickForEpoch(symbol, t2)
+        Feed-->>Service: Exit tick
+        Service->>Service: Evaluate win/loss
+        Service-->>Gateway: BidResponse(bid_price, is_expired=true)
+    else Contract active
+        Service-->>Gateway: BidResponse(current_spot, is_expired=false)
+    end
 ```
 
 ### Consistency Model
 
-| Aspect | Strategy |
-|--------|----------|
-| **Configuration** | Loaded at startup, hot-reload supported |
-| **Market Data** | Real-time, no caching (feed handles this) |
-| **Contract State** | Stateless - computed on each request |
-| **Payout** | Immutable once returned in Ask response |
+| Scenario | Approach |
+|----------|----------|
+| **Configuration Updates** | Hot-reload with graceful transition, no downtime |
+| **Market Data** | Always fetch fresh data from `service-feed` |
+| **Payout Consistency** | Payout fixed at purchase time, Bid must receive original payout |
 
-### Transaction Boundaries
+### Error Handling Strategy
 
-The service is stateless and does not manage transactions. Each request is independent:
-- **Ask**: Point-in-time calculation based on current spot
-- **Bid**: Point-in-time evaluation based on historical ticks
+| Error Type | gRPC Status | Client Action |
+|------------|-------------|---------------|
+| Invalid symbol | `INVALID_ARGUMENT` | Check symbol list |
+| Invalid duration | `INVALID_ARGUMENT` | Fix duration parameters |
+| Market data unavailable | `UNAVAILABLE` | Retry with backoff |
+| Missing tick data | `FAILED_PRECONDITION` | Wait for market data |
+| Internal error | `INTERNAL` | Contact support |
 
 ---
 
 ## Inter-Service Communication Matrix
 
-| Consumer Service | Provider Service | Required Capabilities | Communication Pattern | Purpose | Priority |
-|------------------|------------------|----------------------|----------------------|---------|----------|
-| doublerisefall | service-feed | GetTickForEpoch(symbol, epoch) | Sync gRPC | Current spot, entry tick, evaluation ticks | Critical |
-| doublerisefall | service-feed | GetTicksFromLimit(symbol, start, limit) | Sync gRPC | Tick-based contract evaluation | Critical |
-| doublerisefall | service-feed | Subscribe(symbol, start) | Stream gRPC | Real-time tick updates for streaming | Critical |
-| api-gateway-trading | doublerisefall | GetAsk(params) | Sync gRPC | Contract price request | Critical |
-| api-gateway-trading | doublerisefall | StreamAsk(params) | Stream gRPC | Live price updates | High |
-| api-gateway-trading | doublerisefall | GetBid(params) | Sync gRPC | Contract value evaluation | Critical |
-| api-gateway-trading | doublerisefall | StreamBid(params) | Stream gRPC | Live contract value | High |
+| Consumer | Provider | Capability | Pattern | Purpose | Priority |
+|----------|----------|------------|---------|---------|----------|
+| `service-pricer-doublerisefall` | `service-feed` | `GetTickForEpoch(symbol, epoch)` | Sync gRPC | Current spot, entry tick, evaluation ticks | **Critical** |
+| `service-pricer-doublerisefall` | `service-feed` | `GetTicksFromLimit(symbol, start, limit)` | Sync gRPC | Tick-based contract evaluation | **Critical** |
+| `service-pricer-doublerisefall` | `service-feed` | `Subscribe(symbol, start)` | Stream gRPC | Real-time tick updates for streaming | **Critical** |
+| `api-gateway-trading` | `service-pricer-doublerisefall` | `GetAsk`, `GetBid`, `StreamAsk`, `StreamBid` | gRPC | Contract pricing | **Critical** |
 
 ---
 
 ## Requirements Coverage Matrix
 
-| PRD Section/Requirement | Primary Service | Supporting Services | Implementation Notes |
-|-------------------------|-----------------|---------------------|---------------------|
-| **2.2 Product Definition** | doublerisefall | - | Core pricing logic in pricer package |
-| **2.3 Win/Loss Conditions** | doublerisefall | service-feed | Evaluation in bid.go with ticks from feed |
-| **3.1 Configuration Schema** | doublerisefall | - | config package loads symbols.yaml |
-| **3.3 Duration Constraints** | doublerisefall | - | contract package validates durations |
-| **4.1 Pricing Model** | doublerisefall | - | pricer implements arcsin formula |
-| **4.2 Pricing Formulas** | doublerisefall | - | ask.go implements probability + commission |
-| **4.4 Bid Pricing** | doublerisefall | service-feed | bid.go evaluates with ticks |
-| **5.3 Data Requirements** | doublerisefall | service-feed | feed wrapper implements |
-| **6.1 Service Definition** | doublerisefall | - | grpcsvc implements all 4 RPCs |
-| **6.2 Request Messages** | doublerisefall | - | proto definitions |
-| **6.3 Response Messages** | doublerisefall | - | proto definitions |
-| **7.2 Error Codes** | doublerisefall | - | grpcsvc returns standard gRPC codes |
-| **7.3 Validation Rules** | doublerisefall | - | contract package validates |
+| Requirement | Section | Service | Component | Notes |
+|-------------|---------|---------|-----------|-------|
+| Double Rise/Fall pricing model | Product Brief §4 | doublerisefall | `pricer` | Bivariate normal formula |
+| RISE/FALL contract types | Product Brief §2.3 | doublerisefall | `contract` | Enum in proto |
+| Win/Loss evaluation at t1 and t2 | Product Brief §2.3 | doublerisefall | `pricer` | Path-dependent logic |
+| Time-based durations (s/m/h/d) | Product Brief §3.3 | doublerisefall | `contract` | Duration parsing |
+| Tick-based durations (t) | Product Brief §3.3 | doublerisefall | `contract` | Duration parsing |
+| Duration gap validation (10s/2t) | Product Brief §3.3 | doublerisefall | `contract` | Validation rules |
+| Symbol configuration | Product Brief §3.1 | doublerisefall | `config` | YAML loading |
+| Commission application | Product Brief §4.1 | doublerisefall | `pricer` | Additive model |
+| Max payout limit (1000 USD) | Product Brief §3.2 | doublerisefall | `config` | Per-symbol config |
+| Min stake limit (1 USD) | Product Brief §3.2 | doublerisefall | `config` | Per-symbol config |
+| GetAsk RPC | Product Brief §6.1 | doublerisefall | `grpcsvc` | Unary call |
+| StreamAsk RPC | Product Brief §6.1 | doublerisefall | `grpcsvc` | Server streaming |
+| GetBid RPC | Product Brief §6.1 | doublerisefall | `grpcsvc` | Unary call |
+| StreamBid RPC | Product Brief §6.1 | doublerisefall | `grpcsvc` | Server streaming |
+| Error codes | Product Brief §7.2 | doublerisefall | `grpcsvc` | gRPC status codes |
+| Market data integration | Product Brief §5 | doublerisefall | `feed` | Wrapper pattern |
+| Real-time streaming (on tick/5s) | Product Brief §6.4 | doublerisefall | `grpcsvc` | Stream frequency |
+| Payout precision (2 decimals) | Product Brief §4.1 | doublerisefall | `pricer` | Rounding policy |
+| Price precision (4 decimals) | Product Brief §4.1 | doublerisefall | `pricer` | Rounding policy |
 
 ---
 
 ## User Story Coverage Matrix
 
-| Story ID | User Story Summary | Primary Service | Supporting Services | API Exposure |
-|----------|-------------------|-----------------|---------------------|--------------|
-| US-001 | Request contract price | doublerisefall | service-feed | GetAsk |
-| US-002 | Stream live prices | doublerisefall | service-feed | StreamAsk |
-| US-003 | Purchase contract | doublerisefall | - | GetAsk (price) |
-| US-004 | Evaluate at expiry | doublerisefall | service-feed | GetBid |
-| US-005 | View live contract value | doublerisefall | service-feed | StreamBid |
-| US-006 | Validate parameters | doublerisefall | - | GetAsk validation |
-| US-007 | See potential payout | doublerisefall | - | GetAsk.payout |
-| US-008 | Enforce trading limits | doublerisefall | - | GetAsk validation |
+| Story ID | Summary | Primary Service | Supporting Services | API |
+|----------|---------|-----------------|---------------------|-----|
+| US-001 | Get contract purchase price | doublerisefall | service-feed | `GetAsk` |
+| US-002 | Stream real-time prices | doublerisefall | service-feed | `StreamAsk` |
+| US-003 | Value active contract | doublerisefall | service-feed | `GetBid` |
+| US-004 | Stream contract valuation | doublerisefall | service-feed | `StreamBid` |
+| US-005 | Receive validation errors | doublerisefall | - | gRPC status |
 
 ---
 
 ## Development Order Recommendation
 
-### Phase 1: Foundation (Week 1)
+Since this is a single-service architecture, the development order focuses on internal components:
 
-1. **Generate service template**
-   ```bash
-   go-templates --template service --module-path github.com/regentmarkets/service-pricer-doublerisefall --module-name doublerisefall
-   ```
+### Phase 1: Foundation (Day 1-2)
+1. **Generate service scaffold** using `go-templates`
+2. **Implement `config` package** - YAML loading, symbol configuration
+3. **Implement `contract` package** - Duration parsing, validation rules
 
-2. **Implement config package**
-   - YAML loading
-   - SymbolConfig struct
-   - Validation
+### Phase 2: Core Logic (Day 3-5)
+4. **Implement `pricer` package** - Define interfaces, fair probability calculation
+5. **Implement `feed` package** - Wrapper around `service-feed/client`
 
-3. **Implement feed package**
-   - Wrapper around service-feed/client
-   - FeedProvider interface implementation
+### Phase 3: Integration (Day 6-7)
+6. **Implement `grpcsvc` package** - Wire up gRPC handlers
+7. **Implement `app` package** - Dependency injection, startup
 
-### Phase 2: Core Logic (Week 1-2)
+### Phase 4: Streaming (Day 8-9)
+8. **Add streaming support** - `StreamAsk` and `StreamBid` with tick subscriptions
+9. **Integration testing** - End-to-end tests with mock feed service
 
-4. **Implement contract package**
-   - Duration parsing (ParseDuration)
-   - Duration validation
-   - Contract validation (ValidateAskRequest, ValidateBidRequest)
-
-5. **Implement pricer package**
-   - Interface definitions (ConfigProvider, FeedProvider)
-   - Fair probability calculation (arcsin formula)
-   - CalculateAsk
-   - CalculateBid
-
-### Phase 3: API Layer (Week 2)
-
-6. **Implement grpcsvc package**
-   - GetAsk handler
-   - GetBid handler
-   - StreamAsk handler
-   - StreamBid handler
-   - Error mapping to gRPC codes
-
-### Phase 4: Integration (Week 2)
-
-7. **Integration testing**
-   - End-to-end tests with mock feed
-   - Performance benchmarks
-
-8. **Deployment configuration**
-   - Dockerfile
-   - Kubernetes manifests
-   - Health checks
+### Phase 5: Production Readiness (Day 10)
+10. **Health checks**, graceful shutdown, configuration hot-reload
 
 ---
 
 ## Appendix
 
-### A. Interface Definitions (pricer package)
-
-> **Note**: All types (`*Tick`, `*SymbolConfig`, `*Subscription`, `Duration`, etc.) are internal types defined in the pricer package. **DO NOT** expose proto types in interfaces.
-
-```go
-// Tick is an internal type representing market data (NOT proto type)
-type Tick struct {
-    Symbol string
-    Time   int64   // Unix epoch seconds
-    Quote  string  // Price as string (preserve precision)
-}
-
-// SymbolConfig contains symbol-specific configuration
-type SymbolConfig struct {
-    Symbol         string
-    CommissionRate float64
-    MaxPayout      float64
-    MinStake       float64
-    Enabled        bool
-}
-
-// ConfigProvider provides access to symbol configuration
-type ConfigProvider interface {
-    GetSymbolConfig(symbol string) (*SymbolConfig, error)
-}
-
-// FeedProvider provides access to market data
-// Note: *Tick and *Subscription are internal types, NOT proto types
-type FeedProvider interface {
-    GetTickForEpoch(ctx context.Context, symbol string, epoch int64) (*Tick, bool, error)
-    GetTicksFromLimit(ctx context.Context, symbol string, start int64, limit int64) ([]*Tick, bool, error)
-    Subscribe(ctx context.Context, symbol string, start int64) *Subscription
-    Close() error
-}
-
-// ContractValidator validates contract parameters
-type ContractValidator interface {
-    ValidateAskRequest(ctx context.Context, req *AskRequest) error
-    ValidateBidRequest(ctx context.Context, req *BidRequest) error
-    ParseDuration(s string) (Duration, error)
-}
-```
-
-### B. Pricing Formula Reference
+### A. Pricing Formula Reference
 
 **Correlation**:
-$$
-\rho = \sqrt{\frac{t_1}{t_2}}
-$$
+$$\rho = \sqrt{\frac{t1}{t2}}$$
 
 **Fair Probability**:
-$$
-P_{fair} = \frac{1}{4} + \frac{\arcsin(\rho)}{2\pi}
-$$
+$$P_{fair} = \frac{1}{4} + \frac{\arcsin(\rho)}{2\pi}$$
 
-**Client Price (Unit)**:
-$$
-P_{client} = P_{fair} + \text{Commission}
-$$
+**Client Price (Ask)**:
+$$P_{client} = P_{fair} + \text{commission}$$
 
 **Payout**:
-$$
-\text{Payout} = \frac{\text{Stake}}{P_{client}}
-$$
+$$\text{Payout} = \frac{\text{Stake}}{P_{client}}$$
 
-### C. Error Code Mapping
+### B. Contract Lifecycle States
 
-| Domain Error | gRPC Status Code |
-|--------------|------------------|
-| INVALID_SYMBOL | INVALID_ARGUMENT |
-| INVALID_DURATION | INVALID_ARGUMENT |
-| INVALID_STAKE | INVALID_ARGUMENT |
-| PAYOUT_EXCEEDED | INVALID_ARGUMENT |
-| DURATION_ORDER_INVALID | INVALID_ARGUMENT |
-| DURATION_GAP_INVALID | INVALID_ARGUMENT |
-| MARKET_DATA_ERROR | UNAVAILABLE |
-| PRICING_TIME_FUTURE | INVALID_ARGUMENT |
-| MISSING_ENTRY_TICK | FAILED_PRECONDITION |
-| SYMBOL_DISABLED | FAILED_PRECONDITION |
-| INTERNAL_ERROR | INTERNAL |
+| State | Description | Bid Price |
+|-------|-------------|-----------|
+| **Active (pre-t1)** | Not yet reached first evaluation | Current spot info only |
+| **Active (post-t1, pre-t2)** | Passed first evaluation | Depends on t1 result |
+| **Expired (won)** | Both t1 and t2 conditions met | Original payout |
+| **Expired (lost)** | Either t1 or t2 condition failed | 0 |
 
----
+### C. Error Codes Quick Reference
 
-## Quality Checklist Verification
-
-| Check | Status | Notes |
-|-------|--------|-------|
-| All services have clear, meaningful names | ✅ | `doublerisefall` reflects domain |
-| Service boundaries well-defined | ✅ | Single service, 5 internal packages |
-| Data ownership documented | ✅ | Config owned, ticks external |
-| API structure consistent | ✅ | Standard gRPC pattern |
-| All PRD requirements mapped | ✅ | Full coverage matrix provided |
-| All user stories covered | ✅ | 8 stories mapped to APIs |
-| Inter-service dependencies documented | ✅ | service-feed dependency |
-| Consumer-driven requirements captured | ✅ | Feed client requirements listed |
-| Architecture diagram accurate | ✅ | Mermaid diagram included |
-| Service internal structure aligned with complexity | ✅ | Score 5, light modular |
-| Orchestration requirements documented | ✅ | Health, ports, env vars |
+| Error | gRPC Status | Code |
+|-------|-------------|------|
+| Invalid symbol | `INVALID_ARGUMENT` | `INVALID_SYMBOL` |
+| Invalid duration | `INVALID_ARGUMENT` | `INVALID_DURATION` |
+| Duration order invalid | `INVALID_ARGUMENT` | `DURATION_ORDER_INVALID` |
+| Duration gap invalid | `INVALID_ARGUMENT` | `DURATION_GAP_INVALID` |
+| Stake below minimum | `INVALID_ARGUMENT` | `INVALID_STAKE` |
+| Payout exceeds maximum | `INVALID_ARGUMENT` | `PAYOUT_EXCEEDED` |
+| Missing entry tick | `FAILED_PRECONDITION` | `MISSING_ENTRY_TICK` |
+| Symbol disabled | `FAILED_PRECONDITION` | `SYMBOL_DISABLED` |
+| Market data error | `UNAVAILABLE` | `MARKET_DATA_ERROR` |
+| Internal error | `INTERNAL` | `INTERNAL_ERROR` |
 
 ---
 
-## Second Iteration Refinements
-
-### API Details Verification
-
-**Duration Handling**:
-- Both time-based (s, m, h, d) and tick-based (t) durations supported
-- Tick-based: StreamBid updates ONLY on tick (NO time-based fallback)
-- Time-based: StreamBid updates on tick OR every 5 seconds
-
-**Request Message Fields** (from PRD Section 6.2):
-
-| Field | Type | Required (Ask) | Required (Bid) | Validation |
-|-------|------|----------------|----------------|------------|
-| symbol | string | ✅ | ✅ | Must be in R_10, R_25, R_50, R_75, R_100 |
-| contract_type | enum | ✅ | ✅ | RISE or FALL |
-| currency | string | ✅ | ✅ | Payout currency |
-| first_duration | string | ✅ | ✅ | e.g., "1m", "30s", "5t" |
-| second_duration | string | ✅ | ✅ | e.g., "2m", "60s", "10t" |
-| start_time | int64 | ❌ | ✅ | Required for Bid |
-| stake | string | ✅ | ✅ | Premium amount |
-| payout | string | ❌ | ✅ | From Ask response |
-| pricing_time | int64 | ❌ | ❌ | Optional for repricing |
-
-**Configuration Values** (from PRD Section 3.1):
-
-| Symbol | Commission | Max Payout | Min Stake |
-|--------|------------|------------|-----------|
-| R_10 | 0.05 (5%) | 1000 USD | 1 USD |
-| R_25 | 0.05 (5%) | 1000 USD | 1 USD |
-| R_50 | 0.05 (5%) | 1000 USD | 1 USD |
-| R_75 | 0.05 (5%) | 1000 USD | 1 USD |
-| R_100 | 0.05 (5%) | 1000 USD | 1 USD |
-
-### Implementation Feasibility Assessment
-
-| Component | Feasibility | Risk | Mitigation |
-|-----------|-------------|------|------------|
-| **pricer (arcsin formula)** | High | Low | Standard math library |
-| **feed wrapper** | High | Low | Existing client provided |
-| **duration parsing** | High | Low | Regex-based parsing |
-| **gRPC streaming** | High | Medium | Standard pattern, test reconnection |
-| **config hot-reload** | Medium | Low | Viper watch capability |
-
-### Scalability Considerations
-
-| Metric | Target | Strategy |
-|--------|--------|----------|
-| **Concurrent Streams** | 1000 | Goroutine-per-stream with context cancellation |
-| **GetAsk Latency** | <50ms p99 | Pre-loaded config, efficient feed calls |
-| **Memory** | <500MB | No tick caching, stream cleanup |
-| **CPU** | Linear scaling | Stateless calculation, horizontal scaling |
-
----
-
-## Changelog
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0.0 | 2026-01-15 | Initial architecture document |
-| 1.1.0 | 2026-01-15 | Second iteration: API details, validation, feasibility assessment |
-| 1.1.1 | 2026-01-15 | Addressed verification recommendations: explicit client usage note, clarified internal types, added version compatibility |
+> **Document Version**: 1.0.0
+> **Last Updated**: 2026-01-15

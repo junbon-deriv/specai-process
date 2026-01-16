@@ -1,12 +1,14 @@
 version: v1
 managed:
   enabled: true
+  go_package_prefix:
+    default: github.com/regentmarkets/service-pricer-doublerisefall/api/proto
 plugins:
-  - plugin: buf.build/protocolbuffers/go
-    out: api
+  - name: go
+    out: api/proto
     opt:
       - paths=source_relative
-  - plugin: buf.build/grpc/go
-    out: api
+  - name: go-grpc
+    out: api/proto
     opt:
       - paths=source_relative

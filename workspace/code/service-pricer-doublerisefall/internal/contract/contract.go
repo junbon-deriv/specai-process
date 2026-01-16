@@ -1,24 +1,16 @@
+// Package contract handles contract validation and duration parsing.
 package contract
 
 import (
-	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/pricer"
 )
 
-var (
-	// Supported symbols
-	supportedSymbols = map[string]bool{
-		"R_10":  true,
-		"R_25":  true,
-		"R_50":  true,
-		"R_75":  true,
-		"R_100": true,
-	}
-)
+var durationRegex = regexp.MustCompile(`^(\d+)(s|m|h|d|t)$`)
 
 // Validator validates contract parameters.
 type Validator struct {
@@ -27,167 +19,215 @@ type Validator struct {
 
 // NewValidator creates a new contract validator.
 func NewValidator(config pricer.ConfigProvider) *Validator {
-	return &Validator{
-		config: config,
-	}
+	return &Validator{config: config}
 }
 
-// ValidateAskRequest validates parameters for an Ask request.
-func (v *Validator) ValidateAskRequest(ctx context.Context, req *pricer.AskRequest) error {
-	// Validate symbol
-	if !supportedSymbols[req.Symbol] {
-		return fmt.Errorf("symbol %s: %w", req.Symbol, pricer.ErrInvalidSymbol)
+// ParseDuration parses a duration string into a Duration value.
+func (v *Validator) ParseDuration(s string) (pricer.Duration, error) {
+	matches := durationRegex.FindStringSubmatch(s)
+	if matches == nil {
+		return pricer.Duration{}, pricer.ErrInvalidDuration
 	}
 
-	// Get symbol config for additional validation
-	cfg, err := v.config.GetSymbolConfig(req.Symbol)
+	value, err := strconv.ParseInt(matches[1], 10, 64)
 	if err != nil {
-		return err
+		return pricer.Duration{}, pricer.ErrInvalidDuration
+	}
+
+	unit := pricer.DurationUnit(matches[2])
+
+	// Validate unit is supported
+	switch unit {
+	case pricer.DurationUnitSeconds, pricer.DurationUnitMinutes,
+		pricer.DurationUnitHours, pricer.DurationUnitDays, pricer.DurationUnitTicks:
+		// Valid unit
+	default:
+		return pricer.Duration{}, pricer.ErrInvalidDuration
+	}
+
+	return pricer.Duration{Value: value, Unit: unit}, nil
+}
+
+// ValidateAskRequest validates ask request parameters.
+func (v *Validator) ValidateAskRequest(req *pricer.AskRequest, config *pricer.SymbolConfig) error {
+	// Validate symbol is enabled
+	if !config.Enabled {
+		return pricer.ErrSymbolDisabled
+	}
+
+	// Validate contract type
+	if req.ContractType != pricer.ContractTypeRise && req.ContractType != pricer.ContractTypeFall {
+		return pricer.ErrInvalidContractType
+	}
+
+	// Validate currency
+	if req.Currency == "" {
+		return pricer.ErrInvalidCurrency
 	}
 
 	// Validate stake
-	stake, err := strconv.ParseFloat(req.Stake, 64)
-	if err != nil {
-		return fmt.Errorf("invalid stake format: %w", pricer.ErrInvalidStake)
+	if req.Stake < config.MinStake {
+		return pricer.ErrInvalidStake
 	}
 
-	if stake < cfg.MinStake {
-		return fmt.Errorf("stake %.2f below minimum %.2f: %w", stake, cfg.MinStake, pricer.ErrInvalidStake)
+	// Validate pricing time is not in the future
+	if req.PricingTime > 0 && req.PricingTime > time.Now().Unix() {
+		return pricer.ErrPricingTimeFuture
 	}
 
-	// Validate durations
-	d1, err := ParseDuration(req.FirstDuration)
-	if err != nil {
-		return fmt.Errorf("first_duration: %w", err)
+	// Validate duration order
+	if err := v.validateDurationOrder(req.FirstDuration, req.SecondDuration); err != nil {
+		return err
 	}
 
-	d2, err := ParseDuration(req.SecondDuration)
-	if err != nil {
-		return fmt.Errorf("second_duration: %w", err)
+	// Validate duration gap
+	if err := v.validateDurationGap(req.FirstDuration, req.SecondDuration); err != nil {
+		return err
 	}
 
-	// Validate duration consistency (both must be same type)
-	if d1.IsTickBased != d2.IsTickBased {
-		return fmt.Errorf("durations must be same type (both time-based or both tick-based): %w", pricer.ErrInvalidDuration)
+	// Validate duration ranges
+	if err := v.validateDurationRanges(req.FirstDuration); err != nil {
+		return err
 	}
-
-	// Validate duration order: second > first
-	if d1.IsTickBased {
-		if d2.Value <= d1.Value {
-			return fmt.Errorf("second_duration (%dt) must be greater than first_duration (%dt): %w",
-				d2.Value, d1.Value, pricer.ErrInvalidDuration)
-		}
-		// Validate gap: at least 2 ticks
-		gap := d2.Value - d1.Value
-		if gap < 2 {
-			return fmt.Errorf("duration gap (%d ticks) must be at least 2 ticks: %w",
-				gap, pricer.ErrInvalidDuration)
-		}
-	} else {
-		s1 := d1.ToSeconds()
-		s2 := d2.ToSeconds()
-		if s2 <= s1 {
-			return fmt.Errorf("second_duration (%ds) must be greater than first_duration (%ds): %w",
-				s2, s1, pricer.ErrInvalidDuration)
-		}
-		// Validate gap: at least 10 seconds
-		gap := s2 - s1
-		if gap < 10 {
-			return fmt.Errorf("duration gap (%d seconds) must be at least 10 seconds: %w",
-				gap, pricer.ErrInvalidDuration)
-		}
-	}
-
-	// Validate pricing time (if provided)
-	if req.PricingTime > 0 {
-		now := time.Now().Unix()
-		if req.PricingTime > now {
-			return fmt.Errorf("pricing_time cannot be in the future: %w", pricer.ErrInvalidDuration)
-		}
+	if err := v.validateDurationRanges(req.SecondDuration); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// ValidateBidRequest validates parameters for a Bid request.
-func (v *Validator) ValidateBidRequest(ctx context.Context, req *pricer.BidRequest) error {
-	// Validate symbol
-	if !supportedSymbols[req.Symbol] {
-		return fmt.Errorf("symbol %s: %w", req.Symbol, pricer.ErrInvalidSymbol)
+// ValidateBidRequest validates bid request parameters.
+func (v *Validator) ValidateBidRequest(req *pricer.BidRequest, config *pricer.SymbolConfig) error {
+	// Validate symbol is enabled
+	if !config.Enabled {
+		return pricer.ErrSymbolDisabled
 	}
 
-	// Validate required fields for Bid
+	// Validate contract type
+	if req.ContractType != pricer.ContractTypeRise && req.ContractType != pricer.ContractTypeFall {
+		return pricer.ErrInvalidContractType
+	}
+
+	// Validate currency
+	if req.Currency == "" {
+		return pricer.ErrInvalidCurrency
+	}
+
+	// Validate required fields for bid
 	if req.StartTime == 0 {
 		return pricer.ErrMissingStartTime
 	}
 
-	if req.Payout == "" {
+	if req.Payout == 0 {
 		return pricer.ErrMissingPayout
 	}
 
-	// Validate payout format
-	payout, err := strconv.ParseFloat(req.Payout, 64)
-	if err != nil {
-		return fmt.Errorf("invalid payout format: %w", pricer.ErrInvalidStake)
-	}
-
-	if payout <= 0 {
-		return fmt.Errorf("payout must be positive: %w", pricer.ErrInvalidStake)
-	}
-
-	// Get symbol config for validation
-	cfg, err := v.config.GetSymbolConfig(req.Symbol)
-	if err != nil {
-		return err
-	}
-
-	// Check payout against max
-	if payout > cfg.MaxPayout {
-		return fmt.Errorf("payout %.2f exceeds maximum %.2f: %w",
-			payout, cfg.MaxPayout, pricer.ErrPayoutExceeded)
-	}
-
-	// Validate durations
-	d1, err := ParseDuration(req.FirstDuration)
-	if err != nil {
-		return fmt.Errorf("first_duration: %w", err)
-	}
-
-	d2, err := ParseDuration(req.SecondDuration)
-	if err != nil {
-		return fmt.Errorf("second_duration: %w", err)
-	}
-
-	// Validate duration consistency
-	if d1.IsTickBased != d2.IsTickBased {
-		return fmt.Errorf("durations must be same type: %w", pricer.ErrInvalidDuration)
+	// Validate pricing time is not in the future
+	if req.PricingTime > 0 && req.PricingTime > time.Now().Unix() {
+		return pricer.ErrPricingTimeFuture
 	}
 
 	// Validate duration order
-	if d1.IsTickBased {
-		if d2.Value <= d1.Value {
-			return fmt.Errorf("second_duration must be greater than first_duration: %w",
-				pricer.ErrInvalidDuration)
-		}
-	} else {
-		if d2.ToSeconds() <= d1.ToSeconds() {
-			return fmt.Errorf("second_duration must be greater than first_duration: %w",
-				pricer.ErrInvalidDuration)
-		}
+	if err := v.validateDurationOrder(req.FirstDuration, req.SecondDuration); err != nil {
+		return err
 	}
 
-	// Validate pricing time (if provided)
-	if req.PricingTime > 0 {
-		now := time.Now().Unix()
-		if req.PricingTime > now {
-			return fmt.Errorf("pricing_time cannot be in the future: %w", pricer.ErrInvalidDuration)
+	// Validate duration gap
+	if err := v.validateDurationGap(req.FirstDuration, req.SecondDuration); err != nil {
+		return err
+	}
+
+	// Validate duration ranges
+	if err := v.validateDurationRanges(req.FirstDuration); err != nil {
+		return err
+	}
+	if err := v.validateDurationRanges(req.SecondDuration); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateDurationOrder ensures t2 > t1
+func (v *Validator) validateDurationOrder(d1, d2 pricer.Duration) error {
+	// Both must be the same type (time-based or tick-based)
+	if isTimeBased(d1) != isTimeBased(d2) {
+		return pricer.ErrInvalidDuration
+	}
+
+	// Convert to comparable units
+	var v1, v2 int64
+	var err error
+
+	if isTimeBased(d1) {
+		v1, err = d1.ToSeconds()
+		if err != nil {
+			return err
+		}
+		v2, err = d2.ToSeconds()
+		if err != nil {
+			return err
+		}
+	} else {
+		// Tick-based - compare directly
+		v1 = d1.Value
+		v2 = d2.Value
+	}
+
+	if v2 <= v1 {
+		return pricer.ErrDurationOrder
+	}
+
+	return nil
+}
+
+// validateDurationGap ensures minimum gap (10s for time, 2t for ticks)
+func (v *Validator) validateDurationGap(d1, d2 pricer.Duration) error {
+	if isTimeBased(d1) {
+		// Time-based: minimum 10 seconds gap
+		v1, err := d1.ToSeconds()
+		if err != nil {
+			return err
+		}
+		v2, err := d2.ToSeconds()
+		if err != nil {
+			return err
+		}
+		if v2-v1 < 10 {
+			return pricer.ErrDurationGap
+		}
+	} else {
+		// Tick-based: minimum 2 ticks gap
+		if d2.Value-d1.Value < 2 {
+			return pricer.ErrDurationGap
 		}
 	}
 
 	return nil
 }
 
-// ParseDuration wraps the package-level ParseDuration function.
-func (v *Validator) ParseDuration(s string) (pricer.Duration, error) {
-	return ParseDuration(s)
+// validateDurationRanges validates duration is within acceptable ranges
+func (v *Validator) validateDurationRanges(d pricer.Duration) error {
+	if isTimeBased(d) {
+		// Time-based: 10s to 86400s (1 day)
+		seconds, err := d.ToSeconds()
+		if err != nil {
+			return err
+		}
+		if seconds < 10 || seconds > 86400 {
+			return fmt.Errorf("%w: duration must be between 10s and 1 day", pricer.ErrInvalidDuration)
+		}
+	} else {
+		// Tick-based: 2t to 10t
+		if d.Value < 2 || d.Value > 10 {
+			return fmt.Errorf("%w: tick duration must be between 2 and 10 ticks", pricer.ErrInvalidDuration)
+		}
+	}
+
+	return nil
+}
+
+// isTimeBased checks if duration is time-based (not tick-based)
+func isTimeBased(d pricer.Duration) bool {
+	return d.Unit != pricer.DurationUnitTicks
 }

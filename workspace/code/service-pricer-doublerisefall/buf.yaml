@@ -1,7 +1,13 @@
 version: v1
-breaking:
-  use:
-    - FILE
+name: buf.build/regentmarkets/service-pricer-doublerisefall
+deps:
+  - buf.build/googleapis/googleapis
 lint:
   use:
     - DEFAULT
+  except:
+    - PACKAGE_VERSION_SUFFIX
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE

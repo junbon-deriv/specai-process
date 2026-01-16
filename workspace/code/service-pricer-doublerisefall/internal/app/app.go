@@ -1,3 +1,4 @@
+// Package app handles application initialization and lifecycle.
 package app
 
 import (
@@ -8,193 +9,209 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	pb "github.com/regentmarkets/service-pricer-doublerisefall/api/proto/doublerisefall/v1"
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/config"
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/contract"
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/feed"
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/grpcsvc"
+	healthsvc "github.com/regentmarkets/service-pricer-doublerisefall/internal/health"
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/pricer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 )
 
-// App represents the application with all dependencies.
-type App struct {
-	cfg         *config.Config
-	feedClient  *feed.Client
-	validator   *contract.Validator
-	pricer      *pricer.Pricer
-	grpcService *grpcsvc.Service
-	grpcServer  *grpc.Server
-	logger      *slog.Logger
+// Config contains application configuration.
+type Config struct {
+	GRPCPort        string
+	HealthPort      string
+	FeedServiceAddr string
+	ConfigPath      string
+	LogLevel        string
 }
 
-// Config holds application configuration.
-type Config struct {
-	GRPCPort          int
-	FeedServiceAddr   string
-	ConfigPath        string
-	LogLevel          string
-	FeedRetryAttempts int
-	FeedRetryDelay    time.Duration
+// App represents the application.
+type App struct {
+	config       *Config
+	logger       *slog.Logger
+	grpcServer   *grpc.Server
+	healthServer *healthsvc.Server
+	feedClient   *feed.Client
+	configMgr    *config.Manager
 }
 
 // New creates a new application with all dependencies wired.
 func New(cfg *Config) (*App, error) {
 	// Setup logger
-	logLevel := slog.LevelInfo
+	var logLevel slog.Level
 	switch cfg.LogLevel {
 	case "debug":
 		logLevel = slog.LevelDebug
+	case "info":
+		logLevel = slog.LevelInfo
 	case "warn":
 		logLevel = slog.LevelWarn
 	case "error":
 		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logLevel,
 	}))
 
-	logger.Info("initializing application",
-		"grpc_port", cfg.GRPCPort,
-		"feed_addr", cfg.FeedServiceAddr,
-		"config_path", cfg.ConfigPath,
-	)
+	logger.Info("initializing application", "config", cfg)
 
-	// Load configuration
-	symbolConfig, err := config.Load(cfg.ConfigPath)
+	// Create config manager
+	configMgr, err := config.NewManager(cfg.ConfigPath)
 	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
+		return nil, fmt.Errorf("config: %w", err)
 	}
-
-	logger.Info("configuration loaded successfully")
+	logger.Info("configuration loaded", "path", cfg.ConfigPath)
 
 	// Create feed client
-	feedClient, err := feed.NewClient(
-		cfg.FeedServiceAddr,
-		cfg.FeedRetryAttempts,
-		cfg.FeedRetryDelay,
-	)
+	feedClient, err := feed.NewClient(cfg.FeedServiceAddr)
 	if err != nil {
-		return nil, fmt.Errorf("create feed client: %w", err)
+		return nil, fmt.Errorf("feed client: %w", err)
 	}
-
-	logger.Info("feed client created", "address", cfg.FeedServiceAddr)
+	logger.Info("feed client connected", "addr", cfg.FeedServiceAddr)
 
 	// Create contract validator
-	validator := contract.NewValidator(symbolConfig)
+	validator := contract.NewValidator(configMgr)
 
-	// Create pricer
-	pricerService := pricer.New(symbolConfig, feedClient, validator)
-
-	logger.Info("pricer service initialized")
+	// Create pricer (core logic)
+	pricerSvc := pricer.NewPricer(configMgr, feedClient, validator)
 
 	// Create gRPC service
-	grpcService := grpcsvc.New(pricerService, logger)
+	svc := grpcsvc.NewService(pricerSvc, validator, logger)
 
-	// Create gRPC server
-	grpcServer := grpc.NewServer()
+	// Create gRPC server with interceptors
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(unaryLoggingInterceptor(logger)),
+		grpc.StreamInterceptor(streamLoggingInterceptor(logger)),
+	)
 
 	// Register services
-	pb.RegisterDoubleRiseFallServiceServer(grpcServer, grpcService)
-
-	// Register health check
-	healthServer := health.NewServer()
-	healthpb.RegisterHealthServer(grpcServer, healthServer)
-	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-
-	// Register reflection for development
+	pb.RegisterDoubleRiseFallServiceServer(grpcServer, svc)
+	grpc_health_v1.RegisterHealthServer(grpcServer, health.NewServer())
 	reflection.Register(grpcServer)
 
-	logger.Info("gRPC services registered")
+	logger.Info("gRPC server configured")
 
-	// Enable config hot-reload
-	symbolConfig.Watch(func() {
-		logger.Info("configuration reloaded")
-	})
+	// Create HTTP health server
+	healthServer := healthsvc.NewServer(cfg.HealthPort, logger)
+	logger.Info("health check server configured", "port", cfg.HealthPort)
 
 	return &App{
-		cfg:         symbolConfig,
-		feedClient:  feedClient,
-		validator:   validator,
-		pricer:      pricerService,
-		grpcService: grpcService,
-		grpcServer:  grpcServer,
-		logger:      logger,
+		config:       cfg,
+		logger:       logger,
+		grpcServer:   grpcServer,
+		healthServer: healthServer,
+		feedClient:   feedClient,
+		configMgr:    configMgr,
 	}, nil
 }
 
 // Run starts the application and blocks until shutdown.
-func (a *App) Run(ctx context.Context, port int) error {
-	// Create listener
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+func (a *App) Run(ctx context.Context) error {
+	// Listen on gRPC port
+	lis, err := net.Listen("tcp", ":"+a.config.GRPCPort)
 	if err != nil {
-		return fmt.Errorf("listen on port %d: %w", port, err)
+		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	a.logger.Info("starting gRPC server", "port", port)
+	a.logger.Info("starting gRPC server", "port", a.config.GRPCPort)
 
-	// Create error channel for server errors
-	errChan := make(chan error, 1)
+	// Channel to receive errors from goroutines
+	errCh := make(chan error, 2)
 
-	// Start server in goroutine
+	// Start gRPC server in goroutine
 	go func() {
 		if err := a.grpcServer.Serve(lis); err != nil {
-			errChan <- fmt.Errorf("serve: %w", err)
+			errCh <- fmt.Errorf("grpc server error: %w", err)
 		}
 	}()
 
-	// Setup signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	// Start HTTP health server in goroutine
+	go func() {
+		if err := a.healthServer.Start(); err != nil {
+			errCh <- fmt.Errorf("health server error: %w", err)
+		}
+	}()
+
+	// Setup signal handling for graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// Wait for shutdown signal or error
 	select {
-	case err := <-errChan:
-		return err
-	case sig := <-sigChan:
-		a.logger.Info("received shutdown signal", "signal", sig.String())
-		return a.Shutdown(context.Background())
 	case <-ctx.Done():
-		a.logger.Info("context cancelled")
-		return a.Shutdown(context.Background())
+		a.logger.Info("context cancelled, shutting down")
+	case sig := <-sigCh:
+		a.logger.Info("received signal, shutting down", "signal", sig)
+	case err := <-errCh:
+		a.logger.Error("server error", "error", err)
+		return err
 	}
+
+	return a.Shutdown(context.Background())
 }
 
 // Shutdown gracefully shuts down the application.
 func (a *App) Shutdown(ctx context.Context) error {
 	a.logger.Info("shutting down application")
 
-	// Create shutdown context with timeout
-	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	// Graceful stop for gRPC server
-	stopped := make(chan struct{})
-	go func() {
-		a.grpcServer.GracefulStop()
-		close(stopped)
-	}()
-
-	// Wait for graceful stop or timeout
-	select {
-	case <-stopped:
-		a.logger.Info("gRPC server stopped gracefully")
-	case <-shutdownCtx.Done():
-		a.logger.Warn("shutdown timeout, forcing stop")
-		a.grpcServer.Stop()
+	// Stop HTTP health server
+	if err := a.healthServer.Shutdown(); err != nil {
+		a.logger.Error("failed to shutdown health server", "error", err)
 	}
+
+	// Stop gRPC server
+	a.grpcServer.GracefulStop()
+	a.logger.Info("gRPC server stopped")
 
 	// Close feed client
 	if err := a.feedClient.Close(); err != nil {
-		a.logger.Error("error closing feed client", "error", err)
+		a.logger.Error("failed to close feed client", "error", err)
 	}
 
 	a.logger.Info("application shutdown complete")
 	return nil
+}
+
+// unaryLoggingInterceptor logs unary RPC calls.
+func unaryLoggingInterceptor(logger *slog.Logger) grpc.UnaryServerInterceptor {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		logger.Debug("unary call", "method", info.FullMethod)
+		resp, err := handler(ctx, req)
+		if err != nil {
+			logger.Error("unary call failed", "method", info.FullMethod, "error", err)
+		}
+		return resp, err
+	}
+}
+
+// streamLoggingInterceptor logs stream RPC calls.
+func streamLoggingInterceptor(logger *slog.Logger) grpc.StreamServerInterceptor {
+	return func(
+		srv interface{},
+		ss grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
+		logger.Debug("stream call", "method", info.FullMethod)
+		err := handler(srv, ss)
+		if err != nil {
+			logger.Error("stream call failed", "method", info.FullMethod, "error", err)
+		}
+		return err
+	}
 }

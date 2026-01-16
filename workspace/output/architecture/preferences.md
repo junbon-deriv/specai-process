@@ -1,150 +1,134 @@
-# Architecture Phase Preferences
+# Architecture Preferences: Double Rise/Fall Pricing Service
 
-> **Phase**: Architecture Design
-> **Service**: service-pricer-doublerisefall
+> **Version**: 1.0.0
 > **Created**: 2026-01-15
-> **Status**: Active
+> **Phase**: Architecture
 
 ---
 
-## Decision Log
+## Overview
 
-### User-Provided Preferences
-
-| Decision | Value | Source | Date |
-|----------|-------|--------|------|
-| Service Template Patterns | Standard patterns from service_template_guide.md | User confirmation | 2026-01-15 |
-| Additional Requirements | None specified | User confirmation | 2026-01-15 |
+This document captures user preferences and architectural decisions for the `service-pricer-doublerisefall` service. These preferences guide the architecture design and should be consulted during implementation.
 
 ---
 
-## Service Boundaries
+## Decision Categories
 
-### Guiding Principles
+### 1. Service Boundaries
 
-| Principle | Application |
-|-----------|-------------|
-| **Single Product Focus** | One pricer service per product type (Double Rise/Fall) |
-| **Domain Alignment** | Service boundary matches contract pricing bounded context |
-| **Stateless Design** | No persistent state in pricer, all data from feed/config |
+| Decision | Value | Rationale | User Confirmed |
+|----------|-------|-----------|----------------|
+| **Service Count** | Single service | Focused product scope, clear domain boundary | ✅ Yes |
+| **Service Name** | `service-pricer-doublerisefall` | Follows template guide naming convention | ✅ Yes |
+| **Boundary Principle** | One service per product type | Standard pricing service pattern | ✅ Yes |
 
-### Boundary Decisions
+### 2. Communication Patterns
 
-| Decision | Rationale |
-|----------|-----------|
-| No internal microservices | Product complexity doesn't warrant service splitting |
-| Modular internal packages | Clean separation of concerns without deployment overhead |
-| Leaf service position | No downstream internal dependencies, only feeds external gateway |
+| Decision | Value | Rationale | User Confirmed |
+|----------|-------|-----------|----------------|
+| **Primary Protocol** | gRPC | Internal service, high performance required | ✅ Yes |
+| **REST API** | Not required | Internal consumption only | ✅ Yes |
+| **Streaming** | Server-side streaming | Real-time price updates | ✅ Yes |
+| **Feed Integration** | Use `service-feed/client` wrapper | Per dependency specification | ✅ Yes |
 
----
+### 3. Data Strategy
 
-## Communication Patterns
+| Decision | Value | Rationale | User Confirmed |
+|----------|-------|-----------|----------------|
+| **Database** | None required | Stateless pricing service | ✅ Yes |
+| **Configuration** | YAML files | Simple, hot-reloadable | ✅ Yes |
+| **Market Data** | External (`service-feed`) | Single source of truth | ✅ Yes |
+| **Caching** | None | Always fetch fresh market data | ✅ Yes |
 
-### Protocol Selection
+### 4. Technology Preferences
 
-| Pattern | When Used | Rationale |
-|---------|-----------|-----------|
-| **gRPC (Sync)** | GetAsk, GetBid | Type-safe, low latency, streaming support |
-| **gRPC (Stream)** | StreamAsk, StreamBid | Built-in streaming, efficient bidirectional |
-| **REST (Gateway)** | Optional HTTP access | grpc-gateway for debugging/compatibility |
-
-### Error Handling
-
-| Pattern | Application |
-|---------|-------------|
-| **gRPC Status Codes** | All errors mapped to standard codes |
-| **No Custom Errors** | Domain errors mapped to gRPC codes only |
-| **Fail Fast** | Invalid requests rejected immediately |
-
----
-
-## Data Strategy
-
-### Ownership Model
-
-| Data Type | Owner | Access Pattern |
-|-----------|-------|----------------|
-| Symbol Configuration | service-pricer-doublerisefall | Load at startup, hot-reload |
-| Market Data (Ticks) | service-feed | On-demand fetch |
-| Contract Parameters | Request-scoped | Transient |
-
-### Consistency Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| No caching of ticks | Feed service handles caching |
-| Payout immutability | Fixed at Ask time, never recalculated |
-| Config hot-reload | Support runtime updates without restart |
-
----
-
-## Technology Preferences
-
-### Stack Choices
-
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| **Language** | Go 1.21+ | Service template standard |
-| **API** | gRPC + Protocol Buffers | Type safety, streaming |
-| **Config** | YAML + Viper | Human-readable, standard |
-| **Logging** | slog | Standard library, structured |
-| **Build** | Makefile + buf | Reproducible, proto tooling |
-
-### Coding Standards
-
-| Standard | Application |
-|----------|-------------|
-| **Interface Location** | Defined where consumed (in pricer) |
-| **No shared types** | No models/types/interfaces package |
-| **Dependency Direction** | grpcsvc → pricer → (config, feed, contract) |
-| **gRPC Handlers** | Delegate to business logic, no data assembly |
+| Decision | Value | Rationale | User Confirmed |
+|----------|-------|-----------|----------------|
+| **Language** | Go 1.21+ | Team standard | ✅ Yes |
+| **Proto Toolchain** | buf | Modern, standard | ✅ Yes |
+| **Logging** | slog | Go standard library | ✅ Yes |
+| **Configuration** | Viper | Hot-reload capability | ✅ Yes |
 
 ---
 
 ## Step-Specific Sections
 
-### Service Boundaries (Architecture Phase)
+### Service Boundaries
 
-| Aspect | Decision |
-|--------|----------|
-| **Number of Services** | Single service (service-pricer-doublerisefall) |
-| **Internal Packages** | 5 packages (grpcsvc, pricer, config, contract, feed) |
-| **API Surface** | 4 gRPC methods (GetAsk, StreamAsk, GetBid, StreamBid) |
+**Guiding Principles**:
+- One pricing service per derivative product type
+- Service owns all pricing logic, validation, and configuration
+- External dependencies accessed through wrapper interfaces
+- No shared databases with other services
 
-### Communication Patterns (Architecture Phase)
+**Special Cases**:
+- None identified for this product
 
-| Pattern | Usage |
-|---------|-------|
-| **Synchronous** | GetAsk, GetBid - single request/response |
-| **Streaming** | StreamAsk, StreamBid - server-side streaming |
-| **Client Pattern** | Import and wrap service-feed/client |
+### Communication Patterns
 
-### Data Strategy (Architecture Phase)
+**Synchronous Communication**:
+- gRPC for all service interactions
+- Unary calls: `GetAsk`, `GetBid`
+- Used for: Single price requests
 
-| Strategy | Application |
-|----------|-------------|
-| **Configuration** | Local YAML, no external config service |
-| **Market Data** | Direct feed dependency via wrapper |
-| **State Management** | Stateless - compute on each request |
+**Asynchronous/Streaming Communication**:
+- Server streaming: `StreamAsk`, `StreamBid`
+- Update triggers: On tick OR every 5 seconds (time-based), on tick only (tick-based)
 
-### Technology Preferences (Architecture Phase)
+**Event-Driven Patterns**:
+- Not applicable for this service
 
-| Preference | Value |
-|------------|-------|
-| **Template** | go-templates service template |
-| **Proto Package** | doublerisefall.v1 |
-| **Module Path** | github.com/regentmarkets/service-pricer-doublerisefall |
+### Data Strategy
+
+**Data Ownership**:
+| Entity | Owner | Storage |
+|--------|-------|---------|
+| SymbolConfig | This service | YAML |
+| Contract (request scope) | This service | Memory |
+| Market Data | service-feed | External |
+
+**Consistency Patterns**:
+- Strong consistency for configuration reads
+- Eventual consistency acceptable for market data (always fetch fresh)
+
+**Replication Strategy**:
+- Not applicable (stateless service)
+
+### Technology Preferences
+
+**Stack Choices**:
+| Layer | Choice | Alternative Considered |
+|-------|--------|----------------------|
+| Language | Go | N/A (team standard) |
+| Protocol | gRPC | REST (not needed for internal) |
+| Config | YAML + Viper | JSON (less readable) |
+| Logging | slog | zerolog (external dep) |
+
+**API Standards**:
+- gRPC with Protocol Buffers v3
+- Standard gRPC error codes (no custom errors)
+- Decimal values as strings for precision
+
+**Infrastructure Preferences**:
+- Default to service template patterns
+- No specific deployment requirements captured
 
 ---
 
-## Open Questions
+## User Input Summary
 
-None - all architectural decisions resolved.
+| Checkpoint | Question | Response | Date |
+|------------|----------|----------|------|
+| Initial | Service boundaries, communication patterns, technology preferences | No special preferences - proceed with standard approach | 2026-01-15 |
 
 ---
 
-## Change History
+## Change Log
 
-| Date | Change | Rationale |
-|------|--------|-----------|
-| 2026-01-15 | Initial preferences captured | New architecture phase |
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0.0 | 2026-01-15 | Initial preferences document |
+
+---
+
+> **Last Updated**: 2026-01-15

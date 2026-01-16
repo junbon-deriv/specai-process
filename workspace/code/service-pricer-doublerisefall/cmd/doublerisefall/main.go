@@ -1,54 +1,40 @@
+// Package main is the application entry point.
 package main
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"os"
-	"strconv"
-	"time"
 
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/app"
 )
 
 func main() {
-	// Load configuration from environment variables
+	// Load configuration from environment
 	cfg := &app.Config{
-		GRPCPort:          getEnvInt("GRPC_PORT", 50051),
-		FeedServiceAddr:   getEnv("FEED_SERVICE_ADDR", "localhost:50051"),
-		ConfigPath:        getEnv("CONFIG_PATH", "./config/symbols.yaml"),
-		LogLevel:          getEnv("LOG_LEVEL", "info"),
-		FeedRetryAttempts: getEnvInt("FEED_RETRY_ATTEMPTS", 3),
-		FeedRetryDelay:    time.Duration(getEnvInt("FEED_RETRY_DELAY_MS", 1000)) * time.Millisecond,
+		GRPCPort:        getEnv("GRPC_PORT", "50051"),
+		HealthPort:      getEnv("HEALTH_PORT", "8081"),
+		FeedServiceAddr: getEnv("FEED_SERVICE_ADDR", "localhost:50051"),
+		ConfigPath:      getEnv("CONFIG_PATH", "config/symbols.yml"),
+		LogLevel:        getEnv("LOG_LEVEL", "info"),
 	}
 
 	// Create application
 	application, err := app.New(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create application: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("failed to create application: %v", err)
 	}
 
 	// Run application
-	if err := application.Run(context.Background(), cfg.GRPCPort); err != nil {
-		fmt.Fprintf(os.Stderr, "application error: %v\n", err)
-		os.Exit(1)
+	if err := application.Run(context.Background()); err != nil {
+		log.Fatalf("application error: %v", err)
 	}
 }
 
-// getEnv retrieves an environment variable or returns a default value.
+// getEnv retrieves environment variable with fallback to default.
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
-	}
-	return defaultValue
-}
-
-// getEnvInt retrieves an environment variable as an integer or returns a default value.
-func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		}
 	}
 	return defaultValue
 }

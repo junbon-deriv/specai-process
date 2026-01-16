@@ -1,9 +1,11 @@
+// Package grpcsvc implements the gRPC service handlers.
 package grpcsvc
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	pb "github.com/regentmarkets/service-pricer-doublerisefall/api/proto/doublerisefall/v1"
 	"github.com/regentmarkets/service-pricer-doublerisefall/internal/pricer"
@@ -11,234 +13,302 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Pricer defines the pricing operations required by the gRPC service.
+type Pricer interface {
+	CalculateAsk(ctx context.Context, req *pricer.AskRequest) (*pricer.AskResult, error)
+	CalculateBid(ctx context.Context, req *pricer.BidRequest) (*pricer.BidResult, error)
+	StreamAsk(ctx context.Context, req *pricer.AskRequest) (<-chan *pricer.AskResult, <-chan error)
+	StreamBid(ctx context.Context, req *pricer.BidRequest) (<-chan *pricer.BidResult, <-chan error)
+}
+
+// ContractValidator validates contract parameters.
+type ContractValidator interface {
+	ParseDuration(s string) (pricer.Duration, error)
+}
+
 // Service implements the DoubleRiseFallService gRPC service.
 type Service struct {
 	pb.UnimplementedDoubleRiseFallServiceServer
-	pricer *pricer.Pricer
-	logger *slog.Logger
+	pricer    Pricer
+	validator ContractValidator
+	logger    *slog.Logger
 }
 
-// New creates a new gRPC service.
-func New(p *pricer.Pricer, logger *slog.Logger) *Service {
+// NewService creates a new gRPC service.
+func NewService(pricer Pricer, validator ContractValidator, logger *slog.Logger) *Service {
 	return &Service{
-		pricer: p,
-		logger: logger,
+		pricer:    pricer,
+		validator: validator,
+		logger:    logger,
 	}
 }
 
-// GetAsk handles a single ask price request.
+// GetAsk calculates the ask price for a contract.
 func (s *Service) GetAsk(ctx context.Context, req *pb.GetAskRequest) (*pb.GetAskResponse, error) {
-	s.logger.InfoContext(ctx, "GetAsk request",
-		"symbol", req.GetOptionParameters().GetSymbol(),
-		"contract_type", req.GetOptionParameters().GetContractType().String(),
-	)
+	s.logger.Debug("GetAsk called", "symbol", req.GetOptionParameters().GetSymbol())
 
-	// Convert proto request to internal request
-	askReq, err := s.protoToAskRequest(req)
+	// Map proto to domain
+	askReq, err := s.mapProtoToAskRequest(req)
 	if err != nil {
-		return nil, s.mapError(err)
+		s.logger.Error("failed to map request", "error", err)
+		return nil, mapDomainErrorToGRPC(err)
 	}
 
-	// Calculate ask price
+	// Call pricer
 	result, err := s.pricer.CalculateAsk(ctx, askReq)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "failed to calculate ask", "error", err)
-		return nil, s.mapError(err)
+		s.logger.Error("failed to calculate ask", "error", err)
+		return nil, mapDomainErrorToGRPC(err)
 	}
 
-	// Convert result to proto response
-	return s.askResultToProto(result), nil
+	// Map domain to proto
+	return mapAskResultToProto(result), nil
 }
 
-// StreamAsk handles streaming ask price requests.
+// StreamAsk streams real-time ask price updates.
 func (s *Service) StreamAsk(req *pb.StreamAskRequest, stream pb.DoubleRiseFallService_StreamAskServer) error {
-	ctx := stream.Context()
-	s.logger.InfoContext(ctx, "StreamAsk request",
-		"symbol", req.GetOptionParameters().GetSymbol(),
-	)
+	s.logger.Debug("StreamAsk called", "symbol", req.GetOptionParameters().GetSymbol())
 
-	// Convert proto request to internal request
-	askReq, err := s.protoToAskRequestFromStream(req)
+	// Map proto to domain
+	askReq, err := s.mapProtoToAskRequestFromStream(req)
 	if err != nil {
-		return s.mapError(err)
+		s.logger.Error("failed to map stream request", "error", err)
+		return mapDomainErrorToGRPC(err)
 	}
 
-	// Subscribe to ask price updates
-	sub, err := s.pricer.SubscribeAsk(ctx, askReq)
-	if err != nil {
-		s.logger.ErrorContext(ctx, "failed to subscribe to ask", "error", err)
-		return s.mapError(err)
-	}
-	defer sub.Close()
+	// Start streaming
+	resultCh, errCh := s.pricer.StreamAsk(stream.Context(), askReq)
 
-	// Stream ask results
+	// Forward results to client
 	for {
 		select {
-		case <-ctx.Done():
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case err := <-errCh:
+			if err != nil {
+				s.logger.Error("stream error", "error", err)
+				return mapDomainErrorToGRPC(err)
+			}
 			return nil
-		case result, ok := <-sub.C:
+		case result, ok := <-resultCh:
 			if !ok {
-				// Channel closed, check for error
-				if sub.Err != nil {
-					s.logger.ErrorContext(ctx, "ask subscription error", "error", sub.Err)
-					return s.mapError(sub.Err)
-				}
 				return nil
 			}
-			// Send result to client
-			if err := stream.Send(s.askResultToProto(result)); err != nil {
+			resp := mapAskResultToProto(result)
+			if err := stream.Send(resp); err != nil {
+				s.logger.Error("failed to send result", "error", err)
 				return err
 			}
 		}
 	}
 }
 
-// GetBid handles a single bid price request.
+// GetBid calculates the bid price for an active contract.
 func (s *Service) GetBid(ctx context.Context, req *pb.GetBidRequest) (*pb.GetBidResponse, error) {
-	s.logger.InfoContext(ctx, "GetBid request",
-		"symbol", req.GetOptionParameters().GetSymbol(),
-		"start_time", req.GetOptionParameters().GetStartTime(),
-	)
+	s.logger.Debug("GetBid called", "symbol", req.GetOptionParameters().GetSymbol())
 
-	// Convert proto request to internal request
-	bidReq, err := s.protoToBidRequest(req)
+	// Map proto to domain
+	bidReq, err := s.mapProtoToBidRequest(req)
 	if err != nil {
-		return nil, s.mapError(err)
+		s.logger.Error("failed to map request", "error", err)
+		return nil, mapDomainErrorToGRPC(err)
 	}
 
-	// Calculate bid price
+	// Call pricer
 	result, err := s.pricer.CalculateBid(ctx, bidReq)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "failed to calculate bid", "error", err)
-		return nil, s.mapError(err)
+		s.logger.Error("failed to calculate bid", "error", err)
+		return nil, mapDomainErrorToGRPC(err)
 	}
 
-	// Convert result to proto response
-	return s.bidResultToProto(result), nil
+	// Map domain to proto
+	return mapBidResultToProto(result), nil
 }
 
-// StreamBid handles streaming bid price requests.
+// StreamBid streams real-time bid price updates.
 func (s *Service) StreamBid(req *pb.StreamBidRequest, stream pb.DoubleRiseFallService_StreamBidServer) error {
-	ctx := stream.Context()
-	s.logger.InfoContext(ctx, "StreamBid request",
-		"symbol", req.GetOptionParameters().GetSymbol(),
-		"start_time", req.GetOptionParameters().GetStartTime(),
-	)
+	s.logger.Debug("StreamBid called", "symbol", req.GetOptionParameters().GetSymbol())
 
-	// Convert proto request to internal request
-	bidReq, err := s.protoToBidRequestFromStream(req)
+	// Map proto to domain
+	bidReq, err := s.mapProtoToBidRequestFromStream(req)
 	if err != nil {
-		return s.mapError(err)
+		s.logger.Error("failed to map stream request", "error", err)
+		return mapDomainErrorToGRPC(err)
 	}
 
-	// Subscribe to bid price updates
-	sub, err := s.pricer.SubscribeBid(ctx, bidReq)
-	if err != nil {
-		s.logger.ErrorContext(ctx, "failed to subscribe to bid", "error", err)
-		return s.mapError(err)
-	}
-	defer sub.Close()
+	// Start streaming
+	resultCh, errCh := s.pricer.StreamBid(stream.Context(), bidReq)
 
-	// Stream bid results
+	// Forward results to client
 	for {
 		select {
-		case <-ctx.Done():
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case err := <-errCh:
+			if err != nil {
+				s.logger.Error("stream error", "error", err)
+				return mapDomainErrorToGRPC(err)
+			}
 			return nil
-		case result, ok := <-sub.C:
+		case result, ok := <-resultCh:
 			if !ok {
-				// Channel closed, check for error
-				if sub.Err != nil {
-					s.logger.ErrorContext(ctx, "bid subscription error", "error", sub.Err)
-					return s.mapError(sub.Err)
-				}
 				return nil
 			}
-			// Send result to client
-			if err := stream.Send(s.bidResultToProto(result)); err != nil {
+			resp := mapBidResultToProto(result)
+			if err := stream.Send(resp); err != nil {
+				s.logger.Error("failed to send result", "error", err)
 				return err
 			}
 		}
 	}
 }
 
-// protoToAskRequest converts proto GetAskRequest to internal AskRequest.
-func (s *Service) protoToAskRequest(req *pb.GetAskRequest) (*pricer.AskRequest, error) {
+// mapProtoToAskRequest maps GetAskRequest proto to domain AskRequest
+func (s *Service) mapProtoToAskRequest(req *pb.GetAskRequest) (*pricer.AskRequest, error) {
 	params := req.GetOptionParameters()
-	if params == nil {
-		return nil, fmt.Errorf("missing option_parameters")
+
+	// Parse durations
+	firstDuration, err := s.validator.ParseDuration(params.GetFirstDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	secondDuration, err := s.validator.ParseDuration(params.GetSecondDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse stake
+	stake, err := strconv.ParseFloat(params.GetStake(), 64)
+	if err != nil {
+		return nil, pricer.ErrInvalidStake
 	}
 
 	return &pricer.AskRequest{
 		Symbol:         params.GetSymbol(),
-		ContractType:   s.protoToContractType(params.GetContractType()),
+		ContractType:   mapProtoContractType(params.GetContractType()),
 		Currency:       params.GetCurrency(),
-		FirstDuration:  params.GetFirstDuration(),
-		SecondDuration: params.GetSecondDuration(),
-		Stake:          params.GetStake(),
+		FirstDuration:  firstDuration,
+		SecondDuration: secondDuration,
+		Stake:          stake,
 		PricingTime:    req.GetPricingTime(),
 	}, nil
 }
 
-// protoToAskRequestFromStream converts proto StreamAskRequest to internal AskRequest.
-func (s *Service) protoToAskRequestFromStream(req *pb.StreamAskRequest) (*pricer.AskRequest, error) {
+// mapProtoToAskRequestFromStream maps StreamAskRequest proto to domain AskRequest
+func (s *Service) mapProtoToAskRequestFromStream(req *pb.StreamAskRequest) (*pricer.AskRequest, error) {
 	params := req.GetOptionParameters()
-	if params == nil {
-		return nil, fmt.Errorf("missing option_parameters")
+
+	// Parse durations
+	firstDuration, err := s.validator.ParseDuration(params.GetFirstDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	secondDuration, err := s.validator.ParseDuration(params.GetSecondDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse stake
+	stake, err := strconv.ParseFloat(params.GetStake(), 64)
+	if err != nil {
+		return nil, pricer.ErrInvalidStake
 	}
 
 	return &pricer.AskRequest{
 		Symbol:         params.GetSymbol(),
-		ContractType:   s.protoToContractType(params.GetContractType()),
+		ContractType:   mapProtoContractType(params.GetContractType()),
 		Currency:       params.GetCurrency(),
-		FirstDuration:  params.GetFirstDuration(),
-		SecondDuration: params.GetSecondDuration(),
-		Stake:          params.GetStake(),
+		FirstDuration:  firstDuration,
+		SecondDuration: secondDuration,
+		Stake:          stake,
 		PricingTime:    req.GetPricingTime(),
 	}, nil
 }
 
-// protoToBidRequest converts proto GetBidRequest to internal BidRequest.
-func (s *Service) protoToBidRequest(req *pb.GetBidRequest) (*pricer.BidRequest, error) {
+// mapProtoToBidRequest maps GetBidRequest proto to domain BidRequest
+func (s *Service) mapProtoToBidRequest(req *pb.GetBidRequest) (*pricer.BidRequest, error) {
 	params := req.GetOptionParameters()
-	if params == nil {
-		return nil, fmt.Errorf("missing option_parameters")
+
+	// Parse durations
+	firstDuration, err := s.validator.ParseDuration(params.GetFirstDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	secondDuration, err := s.validator.ParseDuration(params.GetSecondDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse stake
+	stake, err := strconv.ParseFloat(params.GetStake(), 64)
+	if err != nil {
+		return nil, pricer.ErrInvalidStake
+	}
+
+	// Parse payout
+	payout, err := strconv.ParseFloat(params.GetPayout(), 64)
+	if err != nil {
+		return nil, pricer.ErrMissingPayout
 	}
 
 	return &pricer.BidRequest{
 		Symbol:         params.GetSymbol(),
-		ContractType:   s.protoToContractType(params.GetContractType()),
+		ContractType:   mapProtoContractType(params.GetContractType()),
 		Currency:       params.GetCurrency(),
-		FirstDuration:  params.GetFirstDuration(),
-		SecondDuration: params.GetSecondDuration(),
+		FirstDuration:  firstDuration,
+		SecondDuration: secondDuration,
 		StartTime:      params.GetStartTime(),
-		Stake:          params.GetStake(),
-		Payout:         params.GetPayout(),
+		Stake:          stake,
+		Payout:         payout,
 		PricingTime:    req.GetPricingTime(),
 	}, nil
 }
 
-// protoToBidRequestFromStream converts proto StreamBidRequest to internal BidRequest.
-func (s *Service) protoToBidRequestFromStream(req *pb.StreamBidRequest) (*pricer.BidRequest, error) {
+// mapProtoToBidRequestFromStream maps StreamBidRequest proto to domain BidRequest
+func (s *Service) mapProtoToBidRequestFromStream(req *pb.StreamBidRequest) (*pricer.BidRequest, error) {
 	params := req.GetOptionParameters()
-	if params == nil {
-		return nil, fmt.Errorf("missing option_parameters")
+
+	// Parse durations
+	firstDuration, err := s.validator.ParseDuration(params.GetFirstDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	secondDuration, err := s.validator.ParseDuration(params.GetSecondDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse stake
+	stake, err := strconv.ParseFloat(params.GetStake(), 64)
+	if err != nil {
+		return nil, pricer.ErrInvalidStake
+	}
+
+	// Parse payout
+	payout, err := strconv.ParseFloat(params.GetPayout(), 64)
+	if err != nil {
+		return nil, pricer.ErrMissingPayout
 	}
 
 	return &pricer.BidRequest{
 		Symbol:         params.GetSymbol(),
-		ContractType:   s.protoToContractType(params.GetContractType()),
+		ContractType:   mapProtoContractType(params.GetContractType()),
 		Currency:       params.GetCurrency(),
-		FirstDuration:  params.GetFirstDuration(),
-		SecondDuration: params.GetSecondDuration(),
+		FirstDuration:  firstDuration,
+		SecondDuration: secondDuration,
 		StartTime:      params.GetStartTime(),
-		Stake:          params.GetStake(),
-		Payout:         params.GetPayout(),
+		Stake:          stake,
+		Payout:         payout,
 		PricingTime:    req.GetPricingTime(),
 	}, nil
 }
 
-// protoToContractType converts proto ContractType to internal ContractType.
-func (s *Service) protoToContractType(ct pb.ContractType) pricer.ContractType {
+// mapProtoContractType maps proto ContractType to domain ContractType
+func mapProtoContractType(ct pb.ContractType) pricer.ContractType {
 	switch ct {
 	case pb.ContractType_CONTRACT_TYPE_RISE:
 		return pricer.ContractTypeRise
@@ -249,8 +319,8 @@ func (s *Service) protoToContractType(ct pb.ContractType) pricer.ContractType {
 	}
 }
 
-// askResultToProto converts internal AskResult to proto GetAskResponse.
-func (s *Service) askResultToProto(result *pricer.AskResult) *pb.GetAskResponse {
+// mapAskResultToProto maps domain AskResult to proto GetAskResponse
+func mapAskResultToProto(result *pricer.AskResult) *pb.GetAskResponse {
 	return &pb.GetAskResponse{
 		AskPrice:        result.AskPrice,
 		Currency:        result.Currency,
@@ -264,8 +334,8 @@ func (s *Service) askResultToProto(result *pricer.AskResult) *pb.GetAskResponse 
 	}
 }
 
-// bidResultToProto converts internal BidResult to proto GetBidResponse.
-func (s *Service) bidResultToProto(result *pricer.BidResult) *pb.GetBidResponse {
+// mapBidResultToProto maps domain BidResult to proto GetBidResponse
+func mapBidResultToProto(result *pricer.BidResult) *pb.GetBidResponse {
 	return &pb.GetBidResponse{
 		BidPrice:        result.BidPrice,
 		IsExpired:       result.IsExpired,
@@ -283,69 +353,42 @@ func (s *Service) bidResultToProto(result *pricer.BidResult) *pb.GetBidResponse 
 	}
 }
 
-// mapError maps internal errors to gRPC status errors.
-func (s *Service) mapError(err error) error {
-	// Handle wrapped errors by checking error message content
-	errMsg := err.Error()
-
-	// Check for base error types first
+// mapDomainErrorToGRPC maps domain errors to gRPC status codes
+func mapDomainErrorToGRPC(err error) error {
 	switch err {
 	case pricer.ErrInvalidSymbol:
-		return status.Errorf(codes.InvalidArgument, "ERR-DF-S1K: %v", err)
-	case pricer.ErrSymbolDisabled:
-		return status.Errorf(codes.FailedPrecondition, "ERR-DF-S2D: %v", err)
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-S1V: %v", err))
 	case pricer.ErrInvalidDuration:
-		return status.Errorf(codes.InvalidArgument, "ERR-DF-D1N: %v", err)
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-D2U: %v", err))
+	case pricer.ErrDurationOrder:
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-D3O: %v", err))
+	case pricer.ErrDurationGap:
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-D4G: %v", err))
 	case pricer.ErrInvalidStake:
-		return status.Errorf(codes.InvalidArgument, "ERR-DF-K1M: %v", err)
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-K5S: %v", err))
 	case pricer.ErrPayoutExceeded:
-		return status.Errorf(codes.InvalidArgument, "ERR-DF-P1X: %v", err)
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-P6X: %v", err))
+	case pricer.ErrPricingTimeFuture:
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-T2F: %v", err))
 	case pricer.ErrMissingStartTime:
-		return status.Errorf(codes.InvalidArgument, "ERR-DF-R1S: %v", err)
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-T1M: %v", err))
 	case pricer.ErrMissingPayout:
-		return status.Errorf(codes.InvalidArgument, "ERR-DF-R2P: %v", err)
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-P2Y: %v", err))
+	case pricer.ErrInvalidContractType:
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-C2T: %v", err))
+	case pricer.ErrInvalidCurrency:
+		return status.Error(codes.InvalidArgument, fmt.Sprintf("ERR-DR-C3U: %v", err))
+	case pricer.ErrSymbolDisabled:
+		return status.Error(codes.FailedPrecondition, fmt.Sprintf("ERR-DR-Y7D: %v", err))
 	case pricer.ErrMissingEntryTick:
-		return status.Errorf(codes.FailedPrecondition, "ERR-DF-E1M: %v", err)
+		return status.Error(codes.FailedPrecondition, fmt.Sprintf("ERR-DR-E3T: %v", err))
 	case pricer.ErrMarketDataUnavailable:
-		return status.Errorf(codes.Unavailable, "ERR-DF-M1E: %v", err)
+		return status.Error(codes.Unavailable, fmt.Sprintf("ERR-DR-M8E: %v", err))
+	case pricer.ErrStreamDisconnected:
+		return status.Error(codes.Unavailable, fmt.Sprintf("ERR-DR-C1D: %v", err))
+	case pricer.ErrInternal:
+		return status.Error(codes.Internal, fmt.Sprintf("ERR-DR-I9N: %v", err))
+	default:
+		return status.Error(codes.Internal, fmt.Sprintf("ERR-DR-I9N: %v", err))
 	}
-
-	// Check for wrapped errors by examining error message
-	if err != nil {
-		// Duration order errors
-		if contains(errMsg, "must be greater than") {
-			return status.Errorf(codes.InvalidArgument, "ERR-DF-D2O: %v", err)
-		}
-		// Duration gap errors
-		if contains(errMsg, "gap") && (contains(errMsg, "10 seconds") || contains(errMsg, "2 ticks")) {
-			return status.Errorf(codes.InvalidArgument, "ERR-DF-D3G: %v", err)
-		}
-		// Pricing time in future
-		if contains(errMsg, "pricing_time") && contains(errMsg, "future") {
-			return status.Errorf(codes.InvalidArgument, "ERR-DF-T1F: %v", err)
-		}
-		// Missing evaluation tick
-		if contains(errMsg, "insufficient ticks") || contains(errMsg, "evaluation tick") {
-			return status.Errorf(codes.FailedPrecondition, "ERR-DF-E2T: %v", err)
-		}
-	}
-
-	return status.Errorf(codes.Internal, "ERR-DF-I1X: internal error")
-}
-
-// contains checks if a string contains a substring (case-insensitive helper).
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-			findInString(s, substr)))
-}
-
-// findInString searches for substring in string.
-func findInString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

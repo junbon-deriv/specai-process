@@ -1,77 +1,143 @@
-# API Specification Preferences
+# API Preferences
 
-> **Version**: 1.0.0
-> **Created**: 2026-01-15
+> **Phase**: API Specification
 > **Last Updated**: 2026-01-15
-
----
-
-## Overview
-
-This document tracks API design decisions and user preferences for all API specifications across services in this workspace.
+> **Status**: Active
 
 ---
 
 ## General API Standards
 
-| Decision | Value | Rationale |
-|----------|-------|-----------|
-| **Protocol** | gRPC (Protocol Buffers v3) | Type-safe contracts, streaming support, performance |
-| **Versioning Strategy** | Package versioning (v1, v2) | Clean proto organization, backward compatibility |
-| **Field Naming** | snake_case | Proto3 standard convention |
-| **Numeric Precision** | String representation | Preserve decimal precision for financial values |
+### Protocol Preferences
+| Preference | Value | Rationale |
+|------------|-------|-----------|
+| **Internal API Protocol** | gRPC / Protocol Buffers | High-performance binary protocol for service-to-service communication |
+| **Public API Protocol** | REST / JSON | N/A - no public APIs in this project |
+| **Versioning Strategy** | Package versioning (v1, v2) | Standard gRPC versioning pattern |
+
+### Naming Conventions
+| Element | Convention | Example |
+|---------|------------|---------|
+| **Package Name** | `{service}.v{version}` | `doublerisefall.v1` |
+| **Service Name** | `{Product}Service` | `DoubleRiseFallService` |
+| **RPC Methods** | PascalCase, verb prefix | `GetAsk`, `StreamBid` |
+| **Message Names** | PascalCase | `GetAskRequest`, `GetAskResponse` |
+| **Field Names** | snake_case | `current_spot`, `start_time` |
+| **Enum Values** | SCREAMING_SNAKE_CASE with prefix | `CONTRACT_TYPE_RISE` |
+
+### Field Format Standards
+| Data Type | Format | Example |
+|-----------|--------|---------|
+| **Monetary Values** | String (decimal) | `"10.00"`, `"1234.5678"` |
+| **Timestamps** | int64 (Unix epoch seconds) | `1736930731` |
+| **Durations** | String with unit suffix | `"30s"`, `"1m"`, `"5t"` |
+| **Prices** | String, 4 decimal precision | `"0.3589"` |
+| **Payouts** | String, 2 decimal precision | `"27.85"` |
 
 ---
 
 ## Endpoint Design Patterns
 
-| Pattern | Standard | Notes |
-|---------|----------|-------|
-| **RPC Naming** | Verb + Noun (GetAsk, StreamBid) | Clarity of operation |
-| **Streaming** | Server streaming for real-time updates | Unary for single requests |
-| **Endpoint IDs** | API-[SERVICE]-[3CHAR] format | Unique identification |
+### Request/Response Patterns
+| Pattern | Usage | Rationale |
+|---------|-------|-----------|
+| **Unary RPC** | Single request/response | Simple queries like `GetAsk`, `GetBid` |
+| **Server Streaming** | Real-time updates | Price streaming via `StreamAsk`, `StreamBid` |
+| **Client Streaming** | N/A | Not used in this project |
+| **Bidirectional** | N/A | Not used in this project |
+
+### Endpoint ID Format
+| Component | Format | Example |
+|-----------|--------|---------|
+| **Prefix** | `API-` | `API-` |
+| **Service Code** | 2 uppercase letters | `DR` (Double Rise/Fall) |
+| **Unique ID** | 3 alphanumeric chars | `A1K`, `S2T` |
+| **Full Format** | `API-{SVC}-{ID}` | `API-DR-A1K` |
 
 ---
 
 ## Data Model Strategy
 
-| Decision | Standard | Example |
-|----------|----------|---------|
-| **Financial Values** | String type | `"10.00"` not `10.00` |
-| **Timestamps** | Unix epoch (int64) | `1736916600` |
-| **Durations** | Human-readable strings | `"1m"`, `"30s"`, `"5t"` |
-| **Enums** | UNSPECIFIED as value 0 | `CONTRACT_TYPE_UNSPECIFIED = 0` |
+### Message Structure
+| Aspect | Preference | Rationale |
+|--------|------------|-----------|
+| **Nesting** | Flat with shared messages | Reusable `OptionParameters` message |
+| **Optional Fields** | Use `optional` keyword | Explicit optionality for proto3 |
+| **Default Values** | Avoid relying on defaults | Always validate required fields |
+
+### Shared Messages
+| Message | Usage |
+|---------|-------|
+| `OptionParameters` | Common contract parameters for all RPCs |
+| `Limits` | Trading limits returned with Ask responses |
 
 ---
 
 ## Error Handling
 
-| Decision | Standard |
-|----------|----------|
-| **Error Format** | gRPC status codes with detailed messages |
-| **Error Code Format** | ERR-[SERVICE]-[3CHAR] |
-| **Validation Errors** | INVALID_ARGUMENT (code 3) |
-| **Precondition Failures** | FAILED_PRECONDITION (code 9) |
-| **Availability Errors** | UNAVAILABLE (code 14) |
-| **Internal Errors** | INTERNAL (code 13) |
+### Error Code Format
+| Component | Format | Example |
+|-----------|--------|---------|
+| **Prefix** | `ERR-` | `ERR-` |
+| **Service Code** | 2 uppercase letters | `DR` (Double Rise/Fall) |
+| **Unique ID** | 3 alphanumeric chars | `S1V`, `D2U` |
+| **Full Format** | `ERR-{SVC}-{ID}` | `ERR-DR-S1V` |
+
+### gRPC Status Code Mapping
+| Scenario | gRPC Status |
+|----------|-------------|
+| Validation errors | `INVALID_ARGUMENT` |
+| Missing prerequisites | `FAILED_PRECONDITION` |
+| External service unavailable | `UNAVAILABLE` |
+| Internal errors | `INTERNAL` |
+| Not found | `NOT_FOUND` |
+
+### Error Response Structure
+```protobuf
+message ErrorDetail {
+  string code = 1;              // ERR-{SVC}-{ID}
+  string message = 2;           // Human-readable message
+  map<string, string> metadata = 3;  // Additional context
+}
+```
+
+---
+
+## Authentication (Internal APIs)
+
+### Service-to-Service Auth
+| Aspect | Preference |
+|--------|------------|
+| **Method** | mTLS (mutual TLS) |
+| **Certificate Management** | Kubernetes secrets |
+| **Authorization** | Service mesh policies |
 
 ---
 
 ## Service-Specific Preferences
 
-### [service-pricer-doublerisefall] Internal API
+### [doublerisefall] Internal API
 
-| Decision | Value | Date |
-|----------|-------|------|
-| **Authentication** | None (internal service) | 2026-01-15 |
-| **Service Code** | DF (DoubleRiseFall) | 2026-01-15 |
-| **Default Port** | 50051 | 2026-01-15 |
-| **Health Check** | gRPC health protocol | 2026-01-15 |
+| Preference | Value | Notes |
+|------------|-------|-------|
+| **Protocol** | gRPC only | No REST gateway |
+| **Port** | 50051 | Standard gRPC port |
+| **Health Port** | 8081 | HTTP health/metrics |
+| **Stream Update Frequency** | On tick OR every 5s (time-based), on tick only (tick-based) | Per product requirements |
+| **Allowed Consumers** | api-gateway-trading | Single consumer |
 
 ---
 
-## Changelog
+## Decision Log
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0.0 | 2026-01-15 | Initial preferences document for service-pricer-doublerisefall internal API |
+| Date | Decision | Context | Made By |
+|------|----------|---------|---------|
+| 2026-01-15 | Use string for monetary values | Avoid floating-point precision issues | AI Generated |
+| 2026-01-15 | Use Unix epoch seconds for timestamps | Simplicity and language-agnostic | AI Generated |
+| 2026-01-15 | Use shared `OptionParameters` message | DRY principle, consistent validation | AI Generated |
+| 2026-01-15 | Stream terminates after expiry | Automatic cleanup, resource efficiency | AI Generated |
+
+---
+
+> **Version**: 1.0.0
+> **Created**: 2026-01-15
