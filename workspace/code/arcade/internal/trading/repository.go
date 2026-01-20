@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/deriv/arcade/internal/common"
+	"github.com/deriv/arcade/internal/series"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -22,7 +23,7 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 }
 
 // CreatePriceSeries stores a price preview series
-func (r *Repository) CreatePriceSeries(ctx context.Context, accountID, seriesType string, candles []OHLC, quoteValue string) (*PriceSeries, error) {
+func (r *Repository) CreatePriceSeries(ctx context.Context, accountID, seriesType string, candles []series.OHLC, quoteValue string) (*PriceSeries, error) {
 	// Convert candles to JSON
 	candlesJSON, err := json.Marshal(candles)
 	if err != nil {
@@ -127,7 +128,7 @@ func (r *Repository) DeletePriceSeries(ctx context.Context, seriesID int64) erro
 
 // CreateContractInitial creates a new contract with initial data (Phase 1: reserve ID)
 // DEPRECATED: Use open_trade stored procedure instead
-func (r *Repository) CreateContractInitial(ctx context.Context, accountID, seriesType, sentiment string, buyPrice decimal.Decimal, initialCandles []OHLC) (*Contract, error) {
+func (r *Repository) CreateContractInitial(ctx context.Context, accountID, seriesType, sentiment string, buyPrice decimal.Decimal, initialCandles []series.OHLC) (*Contract, error) {
 	tx, ok := common.GetTx(ctx)
 	if !ok {
 		return nil, fmt.Errorf("CreateContractInitial must be called within a transaction")
@@ -167,7 +168,7 @@ func (r *Repository) CreateContractInitial(ctx context.Context, accountID, serie
 
 // UpdateContractComplete updates contract with full data (Phase 2: finalize)
 // DEPRECATED: Use close_trade stored procedure instead
-func (r *Repository) UpdateContractComplete(ctx context.Context, contractID int64, sellCandles []OHLC, sellPrice decimal.Decimal) error {
+func (r *Repository) UpdateContractComplete(ctx context.Context, contractID int64, sellCandles []series.OHLC, sellPrice decimal.Decimal) error {
 	tx, ok := common.GetTx(ctx)
 	if !ok {
 		return fmt.Errorf("UpdateContractComplete must be called within a transaction")

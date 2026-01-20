@@ -24,7 +24,8 @@ INSERT INTO series_types (series_type, config) VALUES
         "volatility": 0.50,
         "drift": 0.0,
         "interval_seconds": 1,
-        "payout_multiplier": 1.8868
+        "payout_multiplier": 1.8868,
+        "generator_type": "gbm"
     }'::jsonb),
     ('Vol100', '{
         "display_name": "Volatility 100",
@@ -32,7 +33,8 @@ INSERT INTO series_types (series_type, config) VALUES
         "volatility": 1.00,
         "drift": 0.0,
         "interval_seconds": 1,
-        "payout_multiplier": 1.8868
+        "payout_multiplier": 1.8868,
+        "generator_type": "gbm"
     }'::jsonb),
     ('Vol200', '{
         "display_name": "Volatility 200",
@@ -40,7 +42,8 @@ INSERT INTO series_types (series_type, config) VALUES
         "volatility": 2.00,
         "drift": 0.0,
         "interval_seconds": 1,
-        "payout_multiplier": 1.8868
+        "payout_multiplier": 1.8868,
+        "generator_type": "gbm"
     }'::jsonb),
     ('Vol300', '{
         "display_name": "Volatility 300",
@@ -48,7 +51,8 @@ INSERT INTO series_types (series_type, config) VALUES
         "volatility": 3.00,
         "drift": 0.0,
         "interval_seconds": 1,
-        "payout_multiplier": 1.8868
+        "payout_multiplier": 1.8868,
+        "generator_type": "gbm"
     }'::jsonb);
 
 CREATE INDEX idx_series_types_active ON series_types(is_active) WHERE is_active = TRUE;

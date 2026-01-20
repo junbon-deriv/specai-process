@@ -62,7 +62,7 @@ func (s *Service) GetAccountBalance(ctx context.Context, accountID string) (deci
 }
 
 // Deposit credits funds to account with idempotency (uses deposit_funds stored procedure)
-func (s *Service) Deposit(ctx context.Context, accountID string, amount decimal.Decimal, depositID string) (*Transaction, error) {
+func (s *Service) Deposit(ctx context.Context, accountID string, amount decimal.Decimal, depositID string) (*DepositResult, error) {
 	// Validate amount
 	if err := common.ValidatePositiveAmount(amount); err != nil {
 		return nil, err
@@ -84,7 +84,7 @@ func (s *Service) Deposit(ctx context.Context, accountID string, amount decimal.
 		SELECT transaction_id, new_balance, is_duplicate, transaction_time
 		FROM deposit_funds($1, $2, $3)
 	`, accountID, amount, idempUUID).Scan(&txnID, &newBalance, &isDuplicate, &txnTime)
-	
+
 	if err != nil {
 		return nil, s.mapPgError(err)
 	}
@@ -99,11 +99,14 @@ func (s *Service) Deposit(ctx context.Context, accountID string, amount decimal.
 		TransactionTime: txnTime,
 	}
 
-	return transaction, nil
+	return &DepositResult{
+		Transaction: transaction,
+		NewBalance:  newBalance,
+	}, nil
 }
 
 // Withdraw debits funds from account with idempotency (uses withdraw_funds stored procedure)
-func (s *Service) Withdraw(ctx context.Context, accountID string, amount decimal.Decimal, withdrawalID string) (*Transaction, error) {
+func (s *Service) Withdraw(ctx context.Context, accountID string, amount decimal.Decimal, withdrawalID string) (*WithdrawalResult, error) {
 	// Validate amount
 	if err := common.ValidatePositiveAmount(amount); err != nil {
 		return nil, err
@@ -125,7 +128,7 @@ func (s *Service) Withdraw(ctx context.Context, accountID string, amount decimal
 		SELECT transaction_id, new_balance, is_duplicate, transaction_time
 		FROM withdraw_funds($1, $2, $3)
 	`, accountID, amount, idempUUID).Scan(&txnID, &newBalance, &isDuplicate, &txnTime)
-	
+
 	if err != nil {
 		return nil, s.mapPgError(err)
 	}
@@ -140,7 +143,10 @@ func (s *Service) Withdraw(ctx context.Context, accountID string, amount decimal
 		TransactionTime: txnTime,
 	}
 
-	return transaction, nil
+	return &WithdrawalResult{
+		Transaction: transaction,
+		NewBalance:  newBalance,
+	}, nil
 }
 
 // mapPgError converts PostgreSQL error codes to API errors

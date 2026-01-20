@@ -8,6 +8,7 @@ import (
 
 	"github.com/deriv/arcade/internal/accounts"
 	"github.com/deriv/arcade/internal/common"
+	"github.com/deriv/arcade/internal/series"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
@@ -16,16 +17,16 @@ import (
 type Service struct {
 	repo           *Repository
 	accountService *accounts.Service
-	gbmGenerator   *GBMGenerator
+	seriesService  *series.Service
 	pool           *pgxpool.Pool
 }
 
 // NewService creates a new trading service
-func NewService(pool *pgxpool.Pool, accountService *accounts.Service) *Service {
+func NewService(pool *pgxpool.Pool, accountService *accounts.Service, seriesService *series.Service) *Service {
 	return &Service{
 		repo:           NewRepository(pool),
 		accountService: accountService,
-		gbmGenerator:   NewGBMGenerator(),
+		seriesService:  seriesService,
 		pool:           pool,
 	}
 }
@@ -42,16 +43,22 @@ func (s *Service) GeneratePreview(ctx context.Context, accountID, seriesType str
 		return nil, err
 	}
 
-	// Get series configuration
-	config := GetSeriesConfig(seriesType)
+	// Get series configuration from database
+	config, err := s.seriesService.GetConfig(ctx, seriesType)
+	if err != nil {
+		return nil, err
+	}
 
-	// Generate 10 candles from initial value
+	// Generate 10 candles from initial value using series service
 	startTime := time.Now().UTC()
-	candles := s.gbmGenerator.GenerateCandles(config.InitialValue, config, 10, startTime)
+	candles, err := s.seriesService.GenerateCandles(ctx, seriesType, config.InitialValue, 10, startTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate candles: %w", err)
+	}
 
 	// Store price series with 10th candle close as quote value
 	quoteValue := common.FormatPrice(candles[9].Close)
-	_, err := s.repo.CreatePriceSeries(ctx, accountID, seriesType, candles, quoteValue)
+	_, err = s.repo.CreatePriceSeries(ctx, accountID, seriesType, candles, quoteValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store price series: %w", err)
 	}
@@ -109,16 +116,23 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 	}
 
 	// Unmarshal buy candles
-	var buyCandles []OHLC
+	var buyCandles []series.OHLC
 	if err := json.Unmarshal(buyOHLCsJSON, &buyCandles); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal buy candles: %w", err)
 	}
 
 	// Phase 2: Generate execution candles and settle immediately
-	config := GetSeriesConfig(req.SeriesType)
 	lastCandle := buyCandles[9]
-	startTime := lastCandle.Timestamp.Add(config.Interval)
-	sellCandles := s.gbmGenerator.GenerateCandles(lastCandle.Close, config, 10, startTime)
+	// Calculate start time from config interval
+	config, err := s.seriesService.GetConfig(ctx, req.SeriesType)
+	if err != nil {
+		return nil, err
+	}
+	startTime := lastCandle.Timestamp.Add(time.Duration(config.IntervalSeconds) * time.Second)
+	sellCandles, err := s.seriesService.GenerateCandles(ctx, req.SeriesType, lastCandle.Close, 10, startTime)
+	if err != nil {
+		return nil, err
+	}
 
 	// Evaluate outcome
 	buyPriceValue := buyCandles[9].Close   // Entry price (10th candle close)
@@ -216,7 +230,7 @@ func (s *Service) mapPgError(err error) error {
 	// P0008 - Contract not found
 	// P0009 - Contract account mismatch
 	// P0010 - Contract already settled
-	
+
 	errMsg := err.Error()
 	if contains(errMsg, "Account not found") || contains(errMsg, "P0001") {
 		return common.ErrAccountNotFound
@@ -227,14 +241,14 @@ func (s *Service) mapPgError(err error) error {
 	if contains(errMsg, "Price series") || contains(errMsg, "P0005") {
 		return common.ErrInvalidQuote
 	}
-	
+
 	return fmt.Errorf("database error: %w", err)
 }
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
 		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-		containsMiddle(s, substr)))
+			containsMiddle(s, substr)))
 }
 
 func containsMiddle(s, substr string) bool {

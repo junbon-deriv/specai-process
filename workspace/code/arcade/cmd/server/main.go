@@ -12,6 +12,7 @@ import (
 	"github.com/deriv/arcade/config"
 	"github.com/deriv/arcade/internal/accounts"
 	"github.com/deriv/arcade/internal/api"
+	"github.com/deriv/arcade/internal/series"
 	"github.com/deriv/arcade/internal/trading"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
@@ -64,7 +65,8 @@ func main() {
 
 	// Initialize services
 	accountService := accounts.NewService(pool)
-	tradingService := trading.NewService(pool, accountService)
+	seriesService := series.NewService(pool)
+	tradingService := trading.NewService(pool, accountService, seriesService)
 
 	// Create router
 	router := api.NewRouter(accountService, tradingService)

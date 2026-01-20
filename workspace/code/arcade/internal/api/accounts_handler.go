@@ -52,9 +52,10 @@ func (h *AccountsHandler) GetAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"account_id": account.AccountID,
-		"balance":    common.FormatAmount(account.Balance),
-		"currency":   account.Currency,
+		"account_id":  account.AccountID,
+		"external_id": account.ExternalID,
+		"balance":     common.FormatAmount(account.Balance),
+		"currency":    account.Currency,
 	}
 	WriteJSON(w, http.StatusOK, response)
 }
@@ -76,24 +77,17 @@ func (h *AccountsHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Process deposit
-	transaction, err := h.accountService.Deposit(r.Context(), accountID, amount, req.DepositID)
-	if err != nil {
-		HandleServiceError(w, err)
-		return
-	}
-
-	// Get updated balance
-	account, err := h.accountService.GetAccount(r.Context(), accountID)
+	// Process deposit (returns transaction and new balance from stored procedure)
+	result, err := h.accountService.Deposit(r.Context(), accountID, amount, req.DepositID)
 	if err != nil {
 		HandleServiceError(w, err)
 		return
 	}
 
 	response := accounts.TransactionResponse{
-		Balance:         common.FormatAmount(account.Balance),
-		TransactionID:   transaction.TransactionID,
-		TransactionTime: transaction.TransactionTime,
+		Balance:         common.FormatAmount(result.NewBalance),
+		TransactionID:   result.Transaction.TransactionID,
+		TransactionTime: result.Transaction.TransactionTime,
 	}
 	WriteJSON(w, http.StatusOK, response)
 }
@@ -115,24 +109,17 @@ func (h *AccountsHandler) Withdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Process withdrawal
-	transaction, err := h.accountService.Withdraw(r.Context(), accountID, amount, req.WithdrawalID)
-	if err != nil {
-		HandleServiceError(w, err)
-		return
-	}
-
-	// Get updated balance
-	account, err := h.accountService.GetAccount(r.Context(), accountID)
+	// Process withdrawal (returns transaction and new balance from stored procedure)
+	result, err := h.accountService.Withdraw(r.Context(), accountID, amount, req.WithdrawalID)
 	if err != nil {
 		HandleServiceError(w, err)
 		return
 	}
 
 	response := accounts.TransactionResponse{
-		Balance:         common.FormatAmount(account.Balance),
-		TransactionID:   transaction.TransactionID,
-		TransactionTime: transaction.TransactionTime,
+		Balance:         common.FormatAmount(result.NewBalance),
+		TransactionID:   result.Transaction.TransactionID,
+		TransactionTime: result.Transaction.TransactionTime,
 	}
 	WriteJSON(w, http.StatusOK, response)
 }

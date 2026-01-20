@@ -1,4 +1,4 @@
-package trading
+package series
 
 import (
 	"math"
@@ -23,18 +23,19 @@ func NewGBMGenerator() *GBMGenerator {
 // GenerateCandles creates OHLC candles using GBM algorithm
 // Formula: dS = μSdt + σSdW where:
 // - S is the price
-// - μ is the drift rate (interest rate - quanto drift)
+// - μ is the drift rate
 // - σ is the volatility
-// - dt is the time interval (1 second)
+// - dt is the time interval
 // - dW is the random increment (normal distribution)
-func (g *GBMGenerator) GenerateCandles(initialPrice decimal.Decimal, config SeriesConfig, count int, startTime time.Time) []OHLC {
+func (g *GBMGenerator) GenerateCandles(initialPrice decimal.Decimal, config *SeriesConfig, count int, startTime time.Time) ([]OHLC, error) {
 	candles := make([]OHLC, count)
 	currentPrice := initialPrice
 	currentTime := startTime
 
-	dt := 1.0 // 1 second interval in seconds
-	drift := config.InterestRate - config.QuantoDrift
+	dt := float64(config.IntervalSeconds)
+	drift := config.Drift
 	volatility := config.Volatility
+	precision := int32(3) // Default precision
 
 	for i := 0; i < count; i++ {
 		// Generate OHLC for this candle
@@ -74,10 +75,10 @@ func (g *GBMGenerator) GenerateCandles(initialPrice decimal.Decimal, config Seri
 		close := prices[len(prices)-1]
 
 		// Round to specified precision
-		open = roundToPrecision(open, config.Precision)
-		high = roundToPrecision(high, config.Precision)
-		low = roundToPrecision(low, config.Precision)
-		close = roundToPrecision(close, config.Precision)
+		open = open.Round(precision)
+		high = high.Round(precision)
+		low = low.Round(precision)
+		close = close.Round(precision)
 
 		candles[i] = OHLC{
 			Timestamp: currentTime,
@@ -89,13 +90,8 @@ func (g *GBMGenerator) GenerateCandles(initialPrice decimal.Decimal, config Seri
 
 		// Update for next candle
 		currentPrice = close
-		currentTime = currentTime.Add(config.Interval)
+		currentTime = currentTime.Add(time.Duration(config.IntervalSeconds) * time.Second)
 	}
 
-	return candles
-}
-
-// roundToPrecision rounds decimal to specified number of decimal places
-func roundToPrecision(d decimal.Decimal, precision int32) decimal.Decimal {
-	return d.Round(precision)
+	return candles, nil
 }

@@ -61,3 +61,15 @@ type TransactionResponse struct {
 	TransactionID   int64     `json:"transaction_id"`
 	TransactionTime time.Time `json:"transaction_time"`
 }
+
+// DepositResult represents deposit operation result
+type DepositResult struct {
+	Transaction *Transaction
+	NewBalance  decimal.Decimal
+}
+
+// WithdrawalResult represents withdrawal operation result
+type WithdrawalResult struct {
+	Transaction *Transaction
+	NewBalance  decimal.Decimal
+}
