@@ -2,32 +2,62 @@ package trading
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/deriv/arcade/internal/accounts"
 	"github.com/deriv/arcade/internal/common"
 	"github.com/deriv/arcade/internal/series"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
 
+// OpenTradeResult represents result from open_trade stored procedure
+type OpenTradeResult struct {
+	ContractID       int64
+	BuyTransactionID int64
+	NewBalance       decimal.Decimal
+	BuyOHLCs         []series.OHLC
+	BuyTime          time.Time
+}
+
+// CloseTradeResult represents result from close_trade stored procedure
+type CloseTradeResult struct {
+	SellTransactionID int64
+	NewBalance        decimal.Decimal
+	SellTime          time.Time
+}
+
+// Repository interface for trading data operations
+type Repository interface {
+	// CreatePriceSeries stores a price preview series
+	CreatePriceSeries(ctx context.Context, accountID, seriesType string, candles []series.OHLC, quoteValue string) (*PriceSeries, error)
+
+	// FindPriceSeries finds price series by account, series type, and quote value
+	FindPriceSeries(ctx context.Context, accountID, seriesType, quoteValue string) (*PriceSeries, error)
+
+	// ListContracts retrieves contracts with optional series filter
+	ListContracts(ctx context.Context, accountID string, seriesType *string) ([]Contract, error)
+
+	// OpenTrade calls open_trade stored procedure
+	OpenTrade(ctx context.Context, accountID string, seriesID int64, sentiment string, buyPrice decimal.Decimal) (*OpenTradeResult, error)
+
+	// CloseTrade calls close_trade stored procedure
+	CloseTrade(ctx context.Context, accountID string, contractID int64, sellPrice decimal.Decimal, sellOHLCs []series.OHLC) (*CloseTradeResult, error)
+}
+
 // Service implements trading business logic
 type Service struct {
-	repo           *Repository
+	repo           Repository
 	accountService *accounts.Service
 	seriesService  *series.Service
-	pool           *pgxpool.Pool
 }
 
 // NewService creates a new trading service
-func NewService(pool *pgxpool.Pool, accountService *accounts.Service, seriesService *series.Service) *Service {
+func NewService(repo Repository, accountService *accounts.Service, seriesService *series.Service) *Service {
 	return &Service{
-		repo:           NewRepository(pool),
+		repo:           repo,
 		accountService: accountService,
 		seriesService:  seriesService,
-		pool:           pool,
 	}
 }
 
@@ -95,34 +125,13 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 	}
 
 	// Phase 1: Call open_trade stored procedure to buy contract
-	var contractID int64
-	var buyTxnID int64
-	var newBalance decimal.Decimal
-	var buyOHLCsJSON []byte
-	var buyTime time.Time
-
-	err = s.pool.QueryRow(ctx, `
-		SELECT contract_id, buy_transaction_id, new_balance, buy_ohlcs, buy_time
-		FROM open_trade($1, $2, $3, $4)
-	`, req.AccountID, priceSeries.SeriesID, req.Sentiment, buyPrice).Scan(
-		&contractID,
-		&buyTxnID,
-		&newBalance,
-		&buyOHLCsJSON,
-		&buyTime,
-	)
+	openResult, err := s.repo.OpenTrade(ctx, req.AccountID, priceSeries.SeriesID, req.Sentiment, buyPrice)
 	if err != nil {
-		return nil, s.mapPgError(err)
-	}
-
-	// Unmarshal buy candles
-	var buyCandles []series.OHLC
-	if err := json.Unmarshal(buyOHLCsJSON, &buyCandles); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal buy candles: %w", err)
+		return nil, err
 	}
 
 	// Phase 2: Generate execution candles and settle immediately
-	lastCandle := buyCandles[9]
+	lastCandle := openResult.BuyOHLCs[9]
 	// Calculate start time from config interval
 	config, err := s.seriesService.GetConfig(ctx, req.SeriesType)
 	if err != nil {
@@ -135,8 +144,8 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 	}
 
 	// Evaluate outcome
-	buyPriceValue := buyCandles[9].Close   // Entry price (10th candle close)
-	sellPriceValue := sellCandles[9].Close // Exit price (20th candle close)
+	buyPriceValue := openResult.BuyOHLCs[9].Close // Entry price (10th candle close)
+	sellPriceValue := sellCandles[9].Close        // Exit price (20th candle close)
 	isWin := s.evaluateOutcome(req.Sentiment, buyPriceValue, sellPriceValue)
 
 	// Calculate payout (sell_price)
@@ -148,33 +157,16 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 		sellPrice = decimal.Zero
 	}
 
-	// Marshal sell candles
-	sellCandlesJSON, err := json.Marshal(sellCandles)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal sell candles: %w", err)
-	}
-
 	// Call close_trade stored procedure to settle contract
-	var sellTxnID int64
-	var finalBalance decimal.Decimal
-	var sellTime time.Time
-
-	err = s.pool.QueryRow(ctx, `
-		SELECT sell_transaction_id, new_balance, sell_time
-		FROM close_trade($1, $2, $3, $4)
-	`, req.AccountID, contractID, sellPrice, sellCandlesJSON).Scan(
-		&sellTxnID,
-		&finalBalance,
-		&sellTime,
-	)
+	_, err = s.repo.CloseTrade(ctx, req.AccountID, openResult.ContractID, sellPrice, sellCandles)
 	if err != nil {
-		return nil, s.mapPgError(err)
+		return nil, err
 	}
 
 	// Return execution candles (11-20) and payout
 	return &SwipeBuyResponse{
-		ContractID:   contractID,
-		PurchaseTime: buyTime,
+		ContractID:   openResult.ContractID,
+		PurchaseTime: openResult.BuyTime,
 		OHLCs:        sellCandles,
 		Payout:       common.FormatAmount(sellPrice),
 	}, nil

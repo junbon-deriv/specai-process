@@ -12,6 +12,7 @@ import (
 	"github.com/deriv/arcade/config"
 	"github.com/deriv/arcade/internal/accounts"
 	"github.com/deriv/arcade/internal/api"
+	"github.com/deriv/arcade/internal/repository"
 	"github.com/deriv/arcade/internal/series"
 	"github.com/deriv/arcade/internal/trading"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,10 +64,13 @@ func main() {
 	}
 	log.Info().Msg("Database connection established")
 
-	// Initialize services
-	accountService := accounts.NewService(pool)
-	seriesService := series.NewService(pool)
-	tradingService := trading.NewService(pool, accountService, seriesService)
+	// Create repository manager
+	repoManager := repository.NewManager(pool)
+
+	// Initialize services with injected repositories
+	accountService := accounts.NewService(repoManager.AccountsRepository())
+	seriesService := series.NewService(repoManager.SeriesRepository())
+	tradingService := trading.NewService(repoManager.TradingRepository(), accountService, seriesService)
 
 	// Create router
 	router := api.NewRouter(accountService, tradingService)

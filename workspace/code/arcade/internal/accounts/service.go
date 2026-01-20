@@ -3,25 +3,36 @@ package accounts
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/deriv/arcade/internal/common"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
 
+// Repository interface for account data operations
+type Repository interface {
+	// CreateAccount creates a new account with SW-prefixed ID
+	CreateAccount(ctx context.Context, currency string, externalID *string) (*Account, error)
+
+	// GetAccount retrieves account by ID
+	GetAccount(ctx context.Context, accountID string) (*Account, error)
+
+	// DepositFunds calls deposit_funds stored procedure
+	DepositFunds(ctx context.Context, accountID string, amount decimal.Decimal, idempotencyID uuid.UUID) (*DepositResult, error)
+
+	// WithdrawFunds calls withdraw_funds stored procedure
+	WithdrawFunds(ctx context.Context, accountID string, amount decimal.Decimal, idempotencyID uuid.UUID) (*WithdrawalResult, error)
+}
+
 // Service implements account business logic
 type Service struct {
-	repo *Repository
-	pool *pgxpool.Pool
+	repo Repository
 }
 
 // NewService creates a new accounts service
-func NewService(pool *pgxpool.Pool) *Service {
+func NewService(repo Repository) *Service {
 	return &Service{
-		repo: NewRepository(pool),
-		pool: pool,
+		repo: repo,
 	}
 }
 
@@ -51,16 +62,6 @@ func (s *Service) GetAccount(ctx context.Context, accountID string) (*Account, e
 	return account, nil
 }
 
-// GetAccountBalance retrieves current balance
-func (s *Service) GetAccountBalance(ctx context.Context, accountID string) (decimal.Decimal, error) {
-	balance, err := s.repo.GetAccountBalance(ctx, accountID)
-	if err != nil {
-		return decimal.Zero, err
-	}
-
-	return balance, nil
-}
-
 // Deposit credits funds to account with idempotency (uses deposit_funds stored procedure)
 func (s *Service) Deposit(ctx context.Context, accountID string, amount decimal.Decimal, depositID string) (*DepositResult, error) {
 	// Validate amount
@@ -74,35 +75,8 @@ func (s *Service) Deposit(ctx context.Context, accountID string, amount decimal.
 		return nil, fmt.Errorf("invalid deposit_id format: %w", err)
 	}
 
-	// Call deposit_funds stored procedure
-	var txnID int64
-	var newBalance decimal.Decimal
-	var isDuplicate bool
-	var txnTime time.Time
-
-	err = s.pool.QueryRow(ctx, `
-		SELECT transaction_id, new_balance, is_duplicate, transaction_time
-		FROM deposit_funds($1, $2, $3)
-	`, accountID, amount, idempUUID).Scan(&txnID, &newBalance, &isDuplicate, &txnTime)
-
-	if err != nil {
-		return nil, s.mapPgError(err)
-	}
-
-	// Build transaction response
-	transaction := &Transaction{
-		TransactionID:   txnID,
-		AccountID:       accountID,
-		Type:            TransactionTypeDeposit,
-		Amount:          amount,
-		IdempotencyID:   &depositID,
-		TransactionTime: txnTime,
-	}
-
-	return &DepositResult{
-		Transaction: transaction,
-		NewBalance:  newBalance,
-	}, nil
+	// Call repository method (wraps stored procedure)
+	return s.repo.DepositFunds(ctx, accountID, amount, idempUUID)
 }
 
 // Withdraw debits funds from account with idempotency (uses withdraw_funds stored procedure)
@@ -118,64 +92,6 @@ func (s *Service) Withdraw(ctx context.Context, accountID string, amount decimal
 		return nil, fmt.Errorf("invalid withdrawal_id format: %w", err)
 	}
 
-	// Call withdraw_funds stored procedure
-	var txnID int64
-	var newBalance decimal.Decimal
-	var isDuplicate bool
-	var txnTime time.Time
-
-	err = s.pool.QueryRow(ctx, `
-		SELECT transaction_id, new_balance, is_duplicate, transaction_time
-		FROM withdraw_funds($1, $2, $3)
-	`, accountID, amount, idempUUID).Scan(&txnID, &newBalance, &isDuplicate, &txnTime)
-
-	if err != nil {
-		return nil, s.mapPgError(err)
-	}
-
-	// Build transaction response (amount is stored as negative in DB)
-	transaction := &Transaction{
-		TransactionID:   txnID,
-		AccountID:       accountID,
-		Type:            TransactionTypeWithdrawal,
-		Amount:          amount.Neg(), // Negative for withdrawal
-		IdempotencyID:   &withdrawalID,
-		TransactionTime: txnTime,
-	}
-
-	return &WithdrawalResult{
-		Transaction: transaction,
-		NewBalance:  newBalance,
-	}, nil
-}
-
-// mapPgError converts PostgreSQL error codes to API errors
-func (s *Service) mapPgError(err error) error {
-	errMsg := err.Error()
-
-	// P0001 - Account not found
-	if contains(errMsg, "Account not found") || contains(errMsg, "P0001") {
-		return common.ErrAccountNotFound
-	}
-
-	// P0002 - Insufficient balance
-	if contains(errMsg, "Insufficient balance") || contains(errMsg, "P0002") {
-		return common.ErrInsufficientBalance
-	}
-
-	// P0003 - Invalid amount
-	if contains(errMsg, "Invalid") || contains(errMsg, "P0003") {
-		return fmt.Errorf("invalid amount: %w", err)
-	}
-
-	return fmt.Errorf("database error: %w", err)
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if i+len(substr) <= len(s) && s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	// Call repository method (wraps stored procedure)
+	return s.repo.WithdrawFunds(ctx, accountID, amount, idempUUID)
 }

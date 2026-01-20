@@ -1,41 +1,37 @@
-package series
+package postgres
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 
+	"github.com/deriv/arcade/internal/series"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Repository handles database operations for series types
-type Repository struct {
+// SeriesRepository implements series.Repository interface
+type SeriesRepository struct {
 	pool *pgxpool.Pool
 }
 
-// NewRepository creates a new series repository
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	return &Repository{pool: pool}
+// NewSeriesRepository creates a new series repository
+func NewSeriesRepository(pool *pgxpool.Pool) *SeriesRepository {
+	return &SeriesRepository{pool: pool}
 }
 
-// GetSeriesType retrieves series type configuration from database
-func (r *Repository) GetSeriesType(ctx context.Context, seriesType string) (*SeriesType, error) {
+// GetSeriesConfig retrieves and parses series configuration
+func (r *SeriesRepository) GetSeriesConfig(ctx context.Context, seriesType string) (*series.SeriesConfig, error) {
 	query := `
-		SELECT series_type, config, is_active, created_at
+		SELECT config, is_active
 		FROM series_types
 		WHERE series_type = $1
 	`
 
-	var st SeriesType
 	var configJSON []byte
+	var isActive bool
 
-	err := r.pool.QueryRow(ctx, query, seriesType).Scan(
-		&st.SeriesType,
-		&configJSON,
-		&st.IsActive,
-		&st.CreatedAt,
-	)
+	err := r.pool.QueryRow(ctx, query, seriesType).Scan(&configJSON, &isActive)
 	if err == pgx.ErrNoRows {
 		return nil, fmt.Errorf("series type not found: %s", seriesType)
 	}
@@ -43,30 +39,21 @@ func (r *Repository) GetSeriesType(ctx context.Context, seriesType string) (*Ser
 		return nil, fmt.Errorf("failed to get series type: %w", err)
 	}
 
-	// Unmarshal config
-	if err := json.Unmarshal(configJSON, &st.Config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
-	}
-
-	return &st, nil
-}
-
-// GetSeriesConfig retrieves and parses series configuration
-func (r *Repository) GetSeriesConfig(ctx context.Context, seriesType string) (*SeriesConfig, error) {
-	st, err := r.GetSeriesType(ctx, seriesType)
-	if err != nil {
-		return nil, err
-	}
-
-	if !st.IsActive {
+	if !isActive {
 		return nil, fmt.Errorf("series type is not active: %s", seriesType)
 	}
 
-	return ParseConfig(st.Config)
+	// Parse config
+	var configMap map[string]interface{}
+	if err := json.Unmarshal(configJSON, &configMap); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	return series.ParseConfig(configMap)
 }
 
 // ListActiveSeries retrieves all active series types
-func (r *Repository) ListActiveSeries(ctx context.Context) ([]SeriesType, error) {
+func (r *SeriesRepository) ListActiveSeries(ctx context.Context) ([]series.SeriesType, error) {
 	query := `
 		SELECT series_type, config, is_active, created_at
 		FROM series_types
@@ -80,9 +67,9 @@ func (r *Repository) ListActiveSeries(ctx context.Context) ([]SeriesType, error)
 	}
 	defer rows.Close()
 
-	var seriesTypes []SeriesType
+	var seriesTypes []series.SeriesType
 	for rows.Next() {
-		var st SeriesType
+		var st series.SeriesType
 		var configJSON []byte
 
 		err := rows.Scan(

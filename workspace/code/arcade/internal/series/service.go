@@ -5,20 +5,28 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
 
+// Repository interface for series data operations
+type Repository interface {
+	// GetSeriesConfig retrieves and parses series configuration
+	GetSeriesConfig(ctx context.Context, seriesType string) (*SeriesConfig, error)
+
+	// ListActiveSeries retrieves all active series types
+	ListActiveSeries(ctx context.Context) ([]SeriesType, error)
+}
+
 // Service handles series-related business logic
 type Service struct {
-	repo    *Repository
+	repo    Repository
 	factory *GeneratorFactory
 }
 
 // NewService creates a new series service
-func NewService(pool *pgxpool.Pool) *Service {
+func NewService(repo Repository) *Service {
 	return &Service{
-		repo:    NewRepository(pool),
+		repo:    repo,
 		factory: NewGeneratorFactory(),
 	}
 }
