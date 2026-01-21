@@ -40,7 +40,8 @@ func NewRouter(accountService *accounts.Service, tradingService *trading.Service
 	// Trading endpoints
 	r.Get("/swipe", tradingHandler.SwipeGet)
 	r.Post("/swipe/buy", tradingHandler.SwipeBuy)
-	r.Get("/swipe/list", tradingHandler.SwipeList)
+	r.Get("/swipe/contracts", tradingHandler.SwipeList)
+	r.Get("/swipe/instruments", tradingHandler.SwipeInstruments)
 
 	slog.Info("Router initialized with all endpoints")
 	return r

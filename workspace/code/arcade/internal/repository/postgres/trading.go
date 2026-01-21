@@ -9,6 +9,7 @@ import (
 	"github.com/deriv/arcade/internal/common"
 	"github.com/deriv/arcade/internal/series"
 	"github.com/deriv/arcade/internal/trading"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -61,19 +62,18 @@ func (r *TradingRepository) CreatePriceSeries(ctx context.Context, accountID, se
 	return &ps, nil
 }
 
-// FindPriceSeries finds price series by account, series type, and quote value
-func (r *TradingRepository) FindPriceSeries(ctx context.Context, accountID, seriesType, quoteValue string) (*trading.PriceSeries, error) {
+// GetPriceSeries finds price series by ID
+func (r *TradingRepository) GetPriceSeries(ctx context.Context, seriesID uuid.UUID) (*trading.PriceSeries, error) {
 	query := `
 		SELECT series_id, account_id, series_type, candles, quote_value, created_at
 		FROM price_series
-		WHERE account_id = $1 AND series_type = $2 AND quote_value = $3
-		LIMIT 1
+		WHERE series_id = $1
 	`
 
 	var ps trading.PriceSeries
 	var candlesJSONB []byte
 
-	err := r.pool.QueryRow(ctx, query, accountID, seriesType, quoteValue).Scan(
+	err := r.pool.QueryRow(ctx, query, seriesID).Scan(
 		&ps.SeriesID,
 		&ps.AccountID,
 		&ps.SeriesType,
@@ -85,7 +85,7 @@ func (r *TradingRepository) FindPriceSeries(ctx context.Context, accountID, seri
 		return nil, common.ErrInvalidQuote
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to find price series: %w", err)
+		return nil, fmt.Errorf("failed to get price series: %w", err)
 	}
 
 	// Unmarshal candles
@@ -176,7 +176,7 @@ func (r *TradingRepository) ListContracts(ctx context.Context, accountID string,
 }
 
 // OpenTrade calls open_trade stored procedure
-func (r *TradingRepository) OpenTrade(ctx context.Context, accountID string, seriesID int64, sentiment string, buyPrice decimal.Decimal) (*trading.OpenTradeResult, error) {
+func (r *TradingRepository) OpenTrade(ctx context.Context, accountID string, seriesID uuid.UUID, sentiment string, buyPrice decimal.Decimal) (*trading.OpenTradeResult, error) {
 	var contractID int64
 	var buyTxnID int64
 	var newBalance decimal.Decimal

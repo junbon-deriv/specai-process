@@ -76,3 +76,14 @@ func (h *TradingHandler) SwipeList(w http.ResponseWriter, r *http.Request) {
 
 	WriteJSON(w, http.StatusOK, response)
 }
+
+// SwipeInstruments handles GET /swipe/instruments
+func (h *TradingHandler) SwipeInstruments(w http.ResponseWriter, r *http.Request) {
+	response, err := h.tradingService.ListInstruments(r.Context())
+	if err != nil {
+		HandleServiceError(w, err)
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, response)
+}

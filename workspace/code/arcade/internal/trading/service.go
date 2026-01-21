@@ -8,6 +8,7 @@ import (
 	"github.com/deriv/arcade/internal/accounts"
 	"github.com/deriv/arcade/internal/common"
 	"github.com/deriv/arcade/internal/series"
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
@@ -32,14 +33,14 @@ type Repository interface {
 	// CreatePriceSeries stores a price preview series
 	CreatePriceSeries(ctx context.Context, accountID, seriesType string, candles []series.OHLC, quoteValue string) (*PriceSeries, error)
 
-	// FindPriceSeries finds price series by account, series type, and quote value
-	FindPriceSeries(ctx context.Context, accountID, seriesType, quoteValue string) (*PriceSeries, error)
+	// GetPriceSeries finds price series by ID
+	GetPriceSeries(ctx context.Context, seriesID uuid.UUID) (*PriceSeries, error)
 
 	// ListContracts retrieves contracts with optional series filter
 	ListContracts(ctx context.Context, accountID string, seriesType *string) ([]Contract, error)
 
 	// OpenTrade calls open_trade stored procedure
-	OpenTrade(ctx context.Context, accountID string, seriesID int64, sentiment string, buyPrice decimal.Decimal) (*OpenTradeResult, error)
+	OpenTrade(ctx context.Context, accountID string, seriesID uuid.UUID, sentiment string, buyPrice decimal.Decimal) (*OpenTradeResult, error)
 
 	// CloseTrade calls close_trade stored procedure
 	CloseTrade(ctx context.Context, accountID string, contractID int64, sellPrice decimal.Decimal, sellOHLCs []series.OHLC) (*CloseTradeResult, error)
@@ -88,23 +89,21 @@ func (s *Service) GeneratePreview(ctx context.Context, accountID, seriesType str
 
 	// Store price series with 10th candle close as quote value
 	quoteValue := common.FormatPrice(candles[9].Close)
-	_, err = s.repo.CreatePriceSeries(ctx, accountID, seriesType, candles, quoteValue)
+	priceSeries, err := s.repo.CreatePriceSeries(ctx, accountID, seriesType, candles, quoteValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store price series: %w", err)
 	}
 
 	return &SwipeGetResponse{
-		OHLCs: candles,
+		SeriesID: priceSeries.SeriesID,
+		OHLCs:    candles,
 	}, nil
 }
 
 // ExecuteTrade places a rise/fall binary option with immediate settlement (SwipeBuy)
 // Uses stored procedures for atomic operations
 func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*SwipeBuyResponse, error) {
-	// Validate inputs
-	if err := common.ValidateSeriesType(req.SeriesType); err != nil {
-		return nil, err
-	}
+	// Validate sentiment
 	if err := common.ValidateSentiment(req.Sentiment); err != nil {
 		return nil, err
 	}
@@ -118,14 +117,25 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 		return nil, common.NewAPIError(common.ErrCodeInvalidStake, "Stake must be positive")
 	}
 
-	// Find price series by quote value to get series_id
-	priceSeries, err := s.repo.FindPriceSeries(ctx, req.AccountID, req.SeriesType, req.PreviousQuote)
+	// Parse series_id
+	seriesID, err := uuid.Parse(req.SeriesID)
 	if err != nil {
-		return nil, common.NewAPIError(common.ErrCodeInvalidQuote, "Quote does not match any active preview")
+		return nil, common.NewAPIError(common.ErrCodeInvalidQuote, "Invalid series_id format")
+	}
+
+	// Get price series by ID
+	priceSeries, err := s.repo.GetPriceSeries(ctx, seriesID)
+	if err != nil {
+		return nil, common.NewAPIError(common.ErrCodeInvalidQuote, "Price series not found")
+	}
+
+	// Verify account owns this series
+	if priceSeries.AccountID != req.AccountID {
+		return nil, common.NewAPIError(common.ErrCodeInvalidQuote, "Price series does not belong to account")
 	}
 
 	// Phase 1: Call open_trade stored procedure to buy contract
-	openResult, err := s.repo.OpenTrade(ctx, req.AccountID, priceSeries.SeriesID, req.Sentiment, buyPrice)
+	openResult, err := s.repo.OpenTrade(ctx, req.AccountID, seriesID, req.Sentiment, buyPrice)
 	if err != nil {
 		return nil, err
 	}
@@ -133,12 +143,12 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 	// Phase 2: Generate execution candles and settle immediately
 	lastCandle := openResult.BuyOHLCs[9]
 	// Calculate start time from config interval
-	config, err := s.seriesService.GetConfig(ctx, req.SeriesType)
+	config, err := s.seriesService.GetConfig(ctx, priceSeries.SeriesType)
 	if err != nil {
 		return nil, err
 	}
 	startTime := lastCandle.Timestamp.Add(time.Duration(config.IntervalSeconds) * time.Second)
-	sellCandles, err := s.seriesService.GenerateCandles(ctx, req.SeriesType, lastCandle.Close, 10, startTime)
+	sellCandles, err := s.seriesService.GenerateCandles(ctx, priceSeries.SeriesType, lastCandle.Close, 10, startTime)
 	if err != nil {
 		return nil, err
 	}
@@ -194,6 +204,35 @@ func (s *Service) ListContracts(ctx context.Context, accountID string, seriesTyp
 
 	return &SwipeListResponse{
 		Contracts: contracts,
+	}, nil
+}
+
+// ListInstruments retrieves all active trading instruments (SwipeInstruments)
+func (s *Service) ListInstruments(ctx context.Context) (*SwipeInstrumentsResponse, error) {
+	// Get all active series types from series service
+	seriesTypes, err := s.seriesService.ListActiveSeries(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list series types: %w", err)
+	}
+
+	// Convert to instruments
+	instruments := make([]Instrument, 0, len(seriesTypes))
+	for _, st := range seriesTypes {
+		// Parse config to get display name
+		config, err := series.ParseConfig(st.Config)
+		if err != nil {
+			// Skip if config is invalid
+			continue
+		}
+
+		instruments = append(instruments, Instrument{
+			SeriesType:  st.SeriesType,
+			DisplayName: config.DisplayName,
+		})
+	}
+
+	return &SwipeInstrumentsResponse{
+		Instruments: instruments,
 	}, nil
 }
 

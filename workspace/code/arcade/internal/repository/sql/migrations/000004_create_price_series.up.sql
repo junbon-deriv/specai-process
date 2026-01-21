@@ -1,6 +1,6 @@
 -- Create price_series table for quote preview storage
 CREATE TABLE price_series (
-    series_id BIGSERIAL PRIMARY KEY,
+    series_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     account_id VARCHAR(20) NOT NULL REFERENCES accounts(account_id),
     series_type VARCHAR(10) NOT NULL REFERENCES series_types(series_type),
     candles JSONB NOT NULL,

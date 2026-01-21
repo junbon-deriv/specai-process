@@ -4,12 +4,13 @@ import (
 	"time"
 
 	"github.com/deriv/arcade/internal/series"
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
 // PriceSeries represents a temporary preview series
 type PriceSeries struct {
-	SeriesID   int64         `json:"series_id"`
+	SeriesID   uuid.UUID     `json:"series_id"`
 	AccountID  string        `json:"account_id"`
 	SeriesType string        `json:"series_type"`
 	Candles    []series.OHLC `json:"candles"`
@@ -43,16 +44,16 @@ type SwipeGetRequest struct {
 
 // SwipeGetResponse represents SwipeGet output
 type SwipeGetResponse struct {
-	OHLCs []series.OHLC `json:"ohlcs"`
+	SeriesID uuid.UUID     `json:"series_id"`
+	OHLCs    []series.OHLC `json:"ohlcs"`
 }
 
 // SwipeBuyRequest represents SwipeBuy input
 type SwipeBuyRequest struct {
-	AccountID     string `json:"account_id"`
-	Stake         string `json:"stake"`
-	SeriesType    string `json:"series_type"`
-	PreviousQuote string `json:"previous_quote"`
-	Sentiment     string `json:"sentiment"`
+	SeriesID  string `json:"series_id"`
+	AccountID string `json:"account_id"`
+	Stake     string `json:"stake"`
+	Sentiment string `json:"sentiment"`
 }
 
 // SwipeBuyResponse represents SwipeBuy output
@@ -72,4 +73,15 @@ type SwipeListRequest struct {
 // SwipeListResponse represents SwipeList output
 type SwipeListResponse struct {
 	Contracts []Contract `json:"contracts"`
+}
+
+// Instrument represents an active trading instrument
+type Instrument struct {
+	SeriesType  string `json:"series_type"`
+	DisplayName string `json:"display_name"`
+}
+
+// SwipeInstrumentsResponse represents SwipeInstruments output
+type SwipeInstrumentsResponse struct {
+	Instruments []Instrument `json:"instruments"`
 }

@@ -1,7 +1,23 @@
--- Create open_trade stored procedure
+-- Migration to change series_id from BIGSERIAL to UUID
+-- This is a breaking change that requires data migration
+
+BEGIN;
+
+-- Step 1: Drop the open_trade function (depends on series_id type)
+DROP FUNCTION IF EXISTS open_trade(VARCHAR, BIGINT, VARCHAR, DECIMAL);
+
+-- Step 2: Drop existing data from price_series (since we can't convert BIGSERIAL to UUID)
+-- WARNING: This will delete all existing price series previews
+TRUNCATE TABLE price_series CASCADE;
+
+-- Step 3: Drop the series_id column and recreate as UUID
+ALTER TABLE price_series DROP COLUMN series_id;
+ALTER TABLE price_series ADD COLUMN series_id UUID PRIMARY KEY DEFAULT gen_random_uuid();
+
+-- Step 4: Recreate open_trade function with UUID parameter
 CREATE OR REPLACE FUNCTION open_trade(
     p_account_id VARCHAR(20),
-    p_series_id UUID,               -- Price series ID from quote
+    p_series_id UUID,               -- Changed from BIGINT to UUID
     p_sentiment VARCHAR(10),        -- 'rise' or 'fall'
     p_buy_price DECIMAL(18,6)       -- Stake amount (entry price)
 )
@@ -109,7 +125,7 @@ $$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION open_trade IS 'Atomic contract purchase (BUY).
 Parameters:
   p_account_id - Buyer account
-  p_series_id - Price series ID from quote
+  p_series_id - Price series UUID from quote
   p_sentiment - Trade direction (rise/fall)
   p_buy_price - Stake amount (deducted from balance)
   
@@ -128,3 +144,5 @@ Error codes:
   P0005 - Price series not found
   P0006 - Price series account mismatch
   P0007 - Series type not active';
+
+COMMIT;
