@@ -34,14 +34,14 @@ func (r *TradingRepository) CreatePriceSeries(ctx context.Context, accountID, se
 
 	query := `
 		INSERT INTO price_series (account_id, series_type, candles, quote_value, created_at)
-		VALUES ($1, $2, $3, $4, NOW())
+		VALUES ($1, $2, $3::jsonb, $4, NOW())
 		RETURNING series_id, account_id, series_type, candles, quote_value, created_at
 	`
 
 	var ps trading.PriceSeries
 	var candlesJSONB []byte
 
-	err = r.pool.QueryRow(ctx, query, accountID, seriesType, candlesJSON, quoteValue).Scan(
+	err = r.pool.QueryRow(ctx, query, accountID, seriesType, string(candlesJSON), quoteValue).Scan(
 		&ps.SeriesID,
 		&ps.AccountID,
 		&ps.SeriesType,
@@ -226,8 +226,8 @@ func (r *TradingRepository) CloseTrade(ctx context.Context, accountID string, co
 
 	err = r.pool.QueryRow(ctx, `
 		SELECT sell_transaction_id, new_balance, sell_time
-		FROM close_trade($1, $2, $3, $4)
-	`, accountID, contractID, sellPrice, sellCandlesJSON).Scan(
+		FROM close_trade($1, $2, $3, $4::jsonb)
+	`, accountID, contractID, sellPrice, string(sellCandlesJSON)).Scan(
 		&sellTxnID,
 		&newBalance,
 		&sellTime,
