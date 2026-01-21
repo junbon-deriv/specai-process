@@ -23,14 +23,13 @@ func NewTradingHandler(tradingService *trading.Service) *TradingHandler {
 // SwipeGet handles GET /swipe
 func (h *TradingHandler) SwipeGet(w http.ResponseWriter, r *http.Request) {
 	seriesType := r.URL.Query().Get("series_type")
-	accountID := r.URL.Query().Get("account_id")
 
-	if seriesType == "" || accountID == "" {
-		WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "series_type and account_id are required")
+	if seriesType == "" {
+		WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "series_type is required")
 		return
 	}
 
-	response, err := h.tradingService.GeneratePreview(r.Context(), accountID, seriesType)
+	response, err := h.tradingService.GeneratePreview(r.Context(), seriesType)
 	if err != nil {
 		HandleServiceError(w, err)
 		return

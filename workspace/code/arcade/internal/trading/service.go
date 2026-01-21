@@ -66,14 +66,9 @@ func NewService(repo Repository, accountService *accounts.Service, seriesService
 }
 
 // GeneratePreview creates preview candles for trading decision (SwipeGet)
-func (s *Service) GeneratePreview(ctx context.Context, accountID, seriesType string) (*SwipeGetResponse, error) {
+func (s *Service) GeneratePreview(ctx context.Context, seriesType string) (*SwipeGetResponse, error) {
 	// Validate series type
 	if err := common.ValidateSeriesType(seriesType); err != nil {
-		return nil, err
-	}
-
-	// Validate account exists
-	if _, err := s.accountService.GetAccount(ctx, accountID); err != nil {
 		return nil, err
 	}
 
@@ -91,9 +86,10 @@ func (s *Service) GeneratePreview(ctx context.Context, accountID, seriesType str
 	}
 
 	// Store price series with last candle close as quote value
+	// No account_id association at preview time
 	lastIdx := len(candles) - 1
 	quoteValue := common.FormatPrice(candles[lastIdx].Close)
-	priceSeries, err := s.repo.CreatePriceSeries(ctx, accountID, seriesType, candles, quoteValue)
+	priceSeries, err := s.repo.CreatePriceSeries(ctx, "", seriesType, candles, quoteValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store price series: %w", err)
 	}
@@ -131,11 +127,6 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 	priceSeries, err := s.repo.GetPriceSeries(ctx, seriesID)
 	if err != nil {
 		return nil, common.NewAPIError(common.ErrCodeInvalidQuote, "Price series not found")
-	}
-
-	// Verify account owns this series
-	if priceSeries.AccountID != req.AccountID {
-		return nil, common.NewAPIError(common.ErrCodeInvalidQuote, "Price series does not belong to account")
 	}
 
 	// Phase 1: Call open_trade stored procedure to buy contract

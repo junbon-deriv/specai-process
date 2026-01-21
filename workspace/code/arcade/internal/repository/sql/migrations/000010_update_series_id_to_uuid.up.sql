@@ -11,8 +11,10 @@ DROP FUNCTION IF EXISTS open_trade(VARCHAR, BIGINT, VARCHAR, DECIMAL);
 TRUNCATE TABLE price_series CASCADE;
 
 -- Step 3: Drop the series_id column and recreate as UUID
+-- Also make account_id nullable since preview is not associated with account
 ALTER TABLE price_series DROP COLUMN series_id;
 ALTER TABLE price_series ADD COLUMN series_id UUID PRIMARY KEY DEFAULT gen_random_uuid();
+ALTER TABLE price_series ALTER COLUMN account_id DROP NOT NULL;
 
 -- Step 4: Recreate open_trade function with UUID parameter
 CREATE OR REPLACE FUNCTION open_trade(
@@ -30,7 +32,6 @@ RETURNS TABLE (
 ) AS $$
 DECLARE
     v_current_balance DECIMAL(18,2);
-    v_series_account VARCHAR(20);
     v_series_type VARCHAR(10);
     v_series_candles JSONB;
     v_contract_id BIGINT;
@@ -68,8 +69,9 @@ BEGIN
     END IF;
     
     -- Get and validate price series (no expiry check)
-    SELECT ps.account_id, ps.series_type, ps.candles
-    INTO v_series_account, v_series_type, v_series_candles
+    -- account_id is not checked since preview is not associated with account
+    SELECT ps.series_type, ps.candles
+    INTO v_series_type, v_series_candles
     FROM price_series ps
     WHERE ps.series_id = p_series_id
     FOR UPDATE;  -- Lock to prevent double-use
@@ -77,12 +79,6 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Price series not found: %', p_series_id
             USING ERRCODE = 'P0005';
-    END IF;
-    
-    -- Verify series belongs to this account
-    IF v_series_account != p_account_id THEN
-        RAISE EXCEPTION 'Price series does not belong to account'
-            USING ERRCODE = 'P0006';
     END IF;
     
     -- Validate series type exists and is active

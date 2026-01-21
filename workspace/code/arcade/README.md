@@ -32,9 +32,10 @@ The **arcade** service is the single backend service for Deriv Arcade, an arcade
 - `POST /accounts/{account_id}/withdrawals` - Withdraw funds (idempotent)
 
 ### Trading
-- `GET /swipe?series_type={type}&account_id={id}` - Get price preview
-- `POST /swipe/buy` - Place rise/fall trade
-- `GET /swipe/list?account_id={id}&series_type={type}` - List trading history
+- `GET /swipe?series_type={type}` - Get price preview with series_id
+- `POST /swipe/buy` - Place rise/fall trade using series_id
+- `GET /swipe/contracts?account_id={id}` - List trading history or get single contract
+- `GET /swipe/instruments` - List available trading instruments
 
 ### Operations
 - `GET /health` - Health check endpoint
@@ -184,6 +185,147 @@ go test -v ./internal/accounts/...
 go test -v ./internal/trading/...
 ```
 
+## API Documentation
+
+### GET /swipe/instruments
+List all available trading instruments.
+
+**Request:**
+```bash
+curl "http://localhost:8080/swipe/instruments"
+```
+
+**Response:**
+```json
+{
+  "instruments": [
+    {
+      "series_type": "Vol50",
+      "display_name": "Volatility 50 Index"
+    },
+    {
+      "series_type": "Vol100",
+      "display_name": "Volatility 100 Index"
+    }
+  ]
+}
+```
+
+### GET /swipe
+Get price preview for trading decision. Returns a unique `series_id` that must be used for the subsequent trade.
+
+**Query Parameters:**
+- `series_type` (required): Vol50, Vol100, Vol200, or Vol300
+
+**Request:**
+```bash
+curl "http://localhost:8080/swipe?series_type=Vol100"
+```
+
+**Response:**
+```json
+{
+  "series_id": "550e8400-e29b-41d4-a716-446655440000",
+  "ohlcs": [
+    {
+      "timestamp": "2026-01-21T12:00:00Z",
+      "open": "50000.000",
+      "high": "50012.345",
+      "low": "49988.765",
+      "close": "50005.234"
+    }
+    // ... 10 candles total
+  ]
+}
+```
+
+### POST /swipe/buy
+Place a rise/fall binary option trade. Uses `series_id` from the preview to ensure quote validity.
+
+**Request Body:**
+```json
+{
+  "series_id": "550e8400-e29b-41d4-a716-446655440000",
+  "account_id": "SW1",
+  "stake": "10.00",
+  "sentiment": "rise"
+}
+```
+
+**Request:**
+```bash
+curl -X POST http://localhost:8080/swipe/buy \
+  -H "Content-Type: application/json" \
+  -d '{
+    "series_id": "550e8400-e29b-41d4-a716-446655440000",
+    "account_id": "SW1",
+    "stake": "10.00",
+    "sentiment": "rise"
+  }'
+```
+
+**Response:**
+```json
+{
+  "contract_id": 12345,
+  "purchase_time": "2026-01-21T12:01:00Z",
+  "ohlcs": [
+    {
+      "timestamp": "2026-01-21T12:00:10Z",
+      "open": "50005.234",
+      "high": "50020.123",
+      "low": "50000.456",
+      "close": "50015.789"
+    }
+    // ... 10 execution candles (11-20)
+  ],
+  "payout": "18.87"
+}
+```
+
+### GET /swipe/contracts
+List trading history or retrieve a single contract.
+
+**Query Parameters:**
+- `account_id` (required): Account identifier
+- `contract_id` (optional): Specific contract to retrieve
+- `series_type` (optional): Filter by series type
+
+**List All Contracts:**
+```bash
+curl "http://localhost:8080/swipe/contracts?account_id=SW1"
+```
+
+**Filter by Series Type:**
+```bash
+curl "http://localhost:8080/swipe/contracts?account_id=SW1&series_type=Vol100"
+```
+
+**Get Single Contract:**
+```bash
+curl "http://localhost:8080/swipe/contracts?account_id=SW1&contract_id=12345"
+```
+
+**Response:**
+```json
+{
+  "contracts": [
+    {
+      "contract_id": 12345,
+      "account_id": "SW1",
+      "series_type": "Vol100",
+      "sentiment": "rise",
+      "buy_price": "10.00",
+      "buy_time": "2026-01-21T12:00:00Z",
+      "buy_ohlcs": [...],
+      "sell_price": "18.87",
+      "sell_time": "2026-01-21T12:00:20Z",
+      "sell_ohlcs": [...]
+    }
+  ]
+}
+```
+
 ## Trading Flow Example
 
 ### 1. Create Account
@@ -205,31 +347,35 @@ curl -X POST http://localhost:8080/accounts/SW1/deposits \
   }'
 ```
 
-### 3. Get Price Preview
+### 3. List Available Instruments
 ```bash
-curl "http://localhost:8080/swipe?series_type=Vol100&account_id=SW1"
-
-# Note the 10th candle's close value as previous_quote
+curl "http://localhost:8080/swipe/instruments"
 ```
 
-### 4. Place Trade
+### 4. Get Price Preview
+```bash
+curl "http://localhost:8080/swipe?series_type=Vol100"
+
+# Note the series_id from the response
+```
+
+### 5. Place Trade
 ```bash
 curl -X POST http://localhost:8080/swipe/buy \
   -H "Content-Type: application/json" \
   -d '{
+    "series_id": "550e8400-e29b-41d4-a716-446655440000",
     "account_id": "SW1",
     "stake": "10.00",
-    "series_type": "Vol100",
-    "previous_quote": "50005.234",
     "sentiment": "rise"
   }'
 
-# Returns candles 11-20 and payout amount
+# Returns execution candles and payout amount
 ```
 
-### 5. View Trading History
+### 6. View Trading History
 ```bash
-curl "http://localhost:8080/swipe/list?account_id=SW1"
+curl "http://localhost:8080/swipe/contracts?account_id=SW1"
 ```
 
 ## GBM Price Generation
