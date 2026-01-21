@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,57 +16,64 @@ import (
 	"github.com/deriv/arcade/internal/repository"
 	"github.com/deriv/arcade/internal/series"
 	"github.com/deriv/arcade/internal/trading"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
 func main() {
 	// Setup logging
-	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	var handler slog.Handler
+	handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})
+
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
 
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to load configuration")
+		slog.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
 	}
 
-	// Set log level
-	level, err := zerolog.ParseLevel(cfg.LogLevel)
+	// Set log level from config
+	var level slog.Level
+	switch cfg.LogLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	// Recreate handler with configured level
+	handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+	})
+	logger = slog.New(handler)
+	slog.SetDefault(logger)
+
+	slog.Info("Starting arcade service",
+		"port", cfg.Port,
+		"log_level", cfg.LogLevel)
+
+	// Create repository manager (handles connection, migration, and initialization)
+	// 30s timeout for connection + migration
+	initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer initCancel()
+
+	repoManager, err := repository.New(initCtx, cfg.DatabaseURL, cfg.DBMaxConns, cfg.DBMinConns)
 	if err != nil {
-		level = zerolog.InfoLevel
+		slog.Error("Failed to initialize repository manager", "error", err)
+		os.Exit(1)
 	}
-	zerolog.SetGlobalLevel(level)
+	defer repoManager.Close()
 
-	log.Info().
-		Str("port", fmt.Sprintf("%d", cfg.Port)).
-		Str("log_level", cfg.LogLevel).
-		Msg("Starting arcade service")
-
-	// Create database connection pool
-	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to parse database URL")
-	}
-
-	poolConfig.MaxConns = int32(cfg.DBMaxConns)
-	poolConfig.MinConns = int32(cfg.DBMinConns)
-
-	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create database pool")
-	}
-	defer pool.Close()
-
-	// Test database connection
-	if err := pool.Ping(context.Background()); err != nil {
-		log.Fatal().Err(err).Msg("Failed to ping database")
-	}
-	log.Info().Msg("Database connection established")
-
-	// Create repository manager
-	repoManager := repository.NewManager(pool)
+	slog.Info("Database connection established and schema migrated")
 
 	// Initialize services with injected repositories
 	accountService := accounts.NewService(repoManager.AccountsRepository())
@@ -86,9 +94,10 @@ func main() {
 
 	// Start server in goroutine
 	go func() {
-		log.Info().Str("addr", srv.Addr).Msg("Server listening")
+		slog.Info("Server listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("Server failed")
+			slog.Error("Server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -97,15 +106,15 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Info().Msg("Shutting down server...")
+	slog.Info("Shutting down server...")
 
 	// Graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Error().Err(err).Msg("Server forced to shutdown")
+		slog.Error("Server forced to shutdown", "error", err)
 	}
 
-	log.Info().Msg("Server stopped")
+	slog.Info("Server stopped")
 }

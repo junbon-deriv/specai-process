@@ -2,10 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/deriv/arcade/internal/common"
-	"github.com/rs/zerolog/log"
 )
 
 // ErrorResponse represents the standard error response
@@ -20,9 +20,9 @@ type ErrorResponse struct {
 func WriteJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	
+
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Error().Err(err).Msg("Failed to encode JSON response")
+		slog.Error("Failed to encode JSON response", "error", err)
 	}
 }
 
@@ -36,7 +36,7 @@ func WriteError(w http.ResponseWriter, status int, code, message string) {
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Error().Err(err).Msg("Failed to encode error response")
+		slog.Error("Failed to encode error response", "error", err)
 	}
 }
 
@@ -66,7 +66,7 @@ func HandleServiceError(w http.ResponseWriter, err error) {
 	case common.ErrInvalidQuote:
 		WriteError(w, http.StatusBadRequest, common.ErrCodeInvalidQuote, "Invalid quote")
 	default:
-		log.Error().Err(err).Msg("Internal server error")
+		slog.Error("Internal server error", "error", err)
 		WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred")
 	}
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -8,7 +9,6 @@ import (
 	"github.com/deriv/arcade/internal/trading"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/rs/zerolog/log"
 )
 
 // NewRouter creates and configures the HTTP router
@@ -42,6 +42,6 @@ func NewRouter(accountService *accounts.Service, tradingService *trading.Service
 	r.Post("/swipe/buy", tradingHandler.SwipeBuy)
 	r.Get("/swipe/list", tradingHandler.SwipeList)
 
-	log.Info().Msg("Router initialized with all endpoints")
+	slog.Info("Router initialized with all endpoints")
 	return r
 }
