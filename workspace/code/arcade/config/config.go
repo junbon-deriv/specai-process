@@ -15,13 +15,20 @@ type Config struct {
 	DBMinConns  int    `mapstructure:"DB_MIN_CONNS"`
 }
 
-// Load reads configuration from environment variables
+// Load reads configuration from environment variables and .env file
 func Load() (*Config, error) {
 	viper.SetDefault("PORT", 8080)
 	viper.SetDefault("LOG_LEVEL", "info")
 	viper.SetDefault("DB_MAX_CONNS", 25)
 	viper.SetDefault("DB_MIN_CONNS", 5)
 
+	// Try to read .env file (optional, ignore error if file doesn't exist)
+	viper.SetConfigName(".env")
+	viper.SetConfigType("env")
+	viper.AddConfigPath(".")
+	_ = viper.ReadInConfig() // Ignore error if .env file doesn't exist
+
+	// Environment variables override .env file values
 	viper.AutomaticEnv()
 
 	var cfg Config

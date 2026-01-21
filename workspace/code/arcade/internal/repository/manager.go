@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/deriv/arcade/internal/accounts"
 	"github.com/deriv/arcade/internal/repository/postgres"
@@ -15,6 +14,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	pgxmig "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 )
@@ -37,6 +37,10 @@ func New(ctx context.Context, databaseURL string, maxConns, minConns int) (*Mana
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse database URL: %w", err)
 	}
+
+	// This is needed because we use connection pooler to connect to supabase.
+	// We don't support IPv6, so that's our only option to connect.
+	poolConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	poolConfig.MaxConns = int32(maxConns)
 	poolConfig.MinConns = int32(minConns)
@@ -61,7 +65,7 @@ func New(ctx context.Context, databaseURL string, maxConns, minConns int) (*Mana
 	}
 
 	// Initialize tables (run migrations if needed)
-	if err := manager.initTables(); err != nil {
+	if err := manager.initTables(ctx); err != nil {
 		pool.Close()
 		return nil, err
 	}
@@ -87,6 +91,8 @@ func (m *Manager) TradingRepository() trading.Repository {
 // MigrationNeeded checks if any migrations are needed
 func (m *Manager) MigrationNeeded() (bool, error) {
 	db := stdlib.OpenDBFromPool(m.pool)
+	defer db.Close()
+
 	dbDriver, err := pgxmig.WithInstance(db, &pgxmig.Config{})
 	if err != nil {
 		return false, fmt.Errorf("failed to create migration db instance: %w", err)
@@ -124,20 +130,27 @@ func (m *Manager) MigrationNeeded() (bool, error) {
 }
 
 // buildMigrate creates a migration instance
+// Note: The returned migrate.Migrate owns the db connection and will close it when Close() is called
 func (m *Manager) buildMigrate() (*migrate.Migrate, error) {
 	db := stdlib.OpenDBFromPool(m.pool)
+
 	dbDriver, err := pgxmig.WithInstance(db, &pgxmig.Config{})
 	if err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to create migration db instance: %w", err)
 	}
 
 	srcDriver, err := iofs.New(sqlFS, "sql/migrations")
 	if err != nil {
+		dbDriver.Close()
+		db.Close()
 		return nil, fmt.Errorf("failed to create migration source instance: %w", err)
 	}
 
 	mig, err := migrate.NewWithInstance("iofs", srcDriver, "postgres", dbDriver)
 	if err != nil {
+		dbDriver.Close()
+		db.Close()
 		return nil, err
 	}
 
@@ -160,10 +173,7 @@ func (m *Manager) Migrate() error {
 }
 
 // initTables ensures that the required tables exist in the database
-func (m *Manager) initTables() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
+func (m *Manager) initTables(ctx context.Context) error {
 	// Check if migrations are needed
 	needed, err := m.MigrationNeeded()
 	if err != nil {
