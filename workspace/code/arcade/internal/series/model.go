@@ -22,7 +22,10 @@ type SeriesConfig struct {
 	Drift            float64
 	IntervalSeconds  int
 	PayoutMultiplier decimal.Decimal
-	GeneratorType    string // "gbm", "jump_diffusion", etc.
+	GeneratorType    string          // "gbm", "jump_diffusion", etc.
+	PreviewCandles   int             // Number of candles in preview (default: 10)
+	ExecutionCandles int             // Number of candles in execution (default: 10)
+	Commission       decimal.Decimal // House edge/commission rate (default: 0.03, i.e., 3%)
 }
 
 // OHLC represents a single candlestick
@@ -50,6 +53,13 @@ func ParseConfig(configMap map[string]interface{}) (*SeriesConfig, error) {
 		return def
 	}
 
+	getInt := func(key string, def int) int {
+		if v, ok := configMap[key].(float64); ok {
+			return int(v)
+		}
+		return def
+	}
+
 	return &SeriesConfig{
 		DisplayName:      getString("display_name", "Unknown"),
 		InitialValue:     decimal.NewFromFloat(getFloat("initial_value", 1000.0)),
@@ -58,5 +68,8 @@ func ParseConfig(configMap map[string]interface{}) (*SeriesConfig, error) {
 		IntervalSeconds:  int(getFloat("interval_seconds", 1)),
 		PayoutMultiplier: decimal.NewFromFloat(getFloat("payout_multiplier", 1.8868)),
 		GeneratorType:    getString("generator_type", "gbm"),
+		PreviewCandles:   getInt("preview_candles", 10),
+		ExecutionCandles: getInt("execution_candles", 10),
+		Commission:       decimal.NewFromFloat(getFloat("commission", 0.03)),
 	}, nil
 }

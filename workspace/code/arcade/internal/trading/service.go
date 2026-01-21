@@ -62,7 +62,7 @@ func NewService(repo Repository, accountService *accounts.Service, seriesService
 	}
 }
 
-// GeneratePreview creates a 10-candle OHLC preview series (SwipeGet)
+// GeneratePreview creates preview candles for trading decision (SwipeGet)
 func (s *Service) GeneratePreview(ctx context.Context, accountID, seriesType string) (*SwipeGetResponse, error) {
 	// Validate series type
 	if err := common.ValidateSeriesType(seriesType); err != nil {
@@ -80,15 +80,16 @@ func (s *Service) GeneratePreview(ctx context.Context, accountID, seriesType str
 		return nil, err
 	}
 
-	// Generate 10 candles from initial value using series service
+	// Generate preview candles from initial value using configured count
 	startTime := time.Now().UTC()
-	candles, err := s.seriesService.GenerateCandles(ctx, seriesType, config.InitialValue, 10, startTime)
+	candles, err := s.seriesService.GenerateCandles(ctx, seriesType, config.InitialValue, config.PreviewCandles, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate candles: %w", err)
 	}
 
-	// Store price series with 10th candle close as quote value
-	quoteValue := common.FormatPrice(candles[9].Close)
+	// Store price series with last candle close as quote value
+	lastIdx := len(candles) - 1
+	quoteValue := common.FormatPrice(candles[lastIdx].Close)
 	priceSeries, err := s.repo.CreatePriceSeries(ctx, accountID, seriesType, candles, quoteValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store price series: %w", err)
@@ -141,28 +142,36 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 	}
 
 	// Phase 2: Generate execution candles and settle immediately
-	lastCandle := openResult.BuyOHLCs[9]
-	// Calculate start time from config interval
 	config, err := s.seriesService.GetConfig(ctx, priceSeries.SeriesType)
 	if err != nil {
 		return nil, err
 	}
+
+	// Get last candle from buy OHLCs (last preview candle)
+	lastIdx := len(openResult.BuyOHLCs) - 1
+	lastCandle := openResult.BuyOHLCs[lastIdx]
+	
+	// Calculate start time from config interval
 	startTime := lastCandle.Timestamp.Add(time.Duration(config.IntervalSeconds) * time.Second)
-	sellCandles, err := s.seriesService.GenerateCandles(ctx, priceSeries.SeriesType, lastCandle.Close, 10, startTime)
+	sellCandles, err := s.seriesService.GenerateCandles(ctx, priceSeries.SeriesType, lastCandle.Close, config.ExecutionCandles, startTime)
 	if err != nil {
 		return nil, err
 	}
 
 	// Evaluate outcome
-	buyPriceValue := openResult.BuyOHLCs[9].Close // Entry price (10th candle close)
-	sellPriceValue := sellCandles[9].Close        // Exit price (20th candle close)
+	buyPriceValue := openResult.BuyOHLCs[lastIdx].Close // Entry price (last preview candle close)
+	sellLastIdx := len(sellCandles) - 1
+	sellPriceValue := sellCandles[sellLastIdx].Close // Exit price (last execution candle close)
 	isWin := s.evaluateOutcome(req.Sentiment, buyPriceValue, sellPriceValue)
 
-	// Calculate payout (sell_price)
+	// Calculate payout (sell_price) using configured commission
+	// Formula: payout = stake / (probability + commission)
+	// where probability = 0.5 (50% chance of rise or fall)
 	var sellPrice decimal.Decimal
 	if isWin {
-		// Payout = buy_price / 0.53
-		sellPrice = buyPrice.Div(decimal.NewFromFloat(0.53)).Round(2)
+		probability := decimal.NewFromFloat(0.5)
+		divisor := probability.Add(config.Commission) // 0.5 + commission (e.g., 0.5 + 0.03 = 0.53)
+		sellPrice = buyPrice.Div(divisor).Round(2)
 	} else {
 		sellPrice = decimal.Zero
 	}
