@@ -96,6 +96,54 @@ func (r *TradingRepository) GetPriceSeries(ctx context.Context, seriesID uuid.UU
 	return &ps, nil
 }
 
+// GetContract retrieves a single contract by ID
+func (r *TradingRepository) GetContract(ctx context.Context, contractID int64) (*trading.Contract, error) {
+	query := `
+		SELECT contract_id, account_id, series_type, sentiment,
+		       buy_price, buy_time, buy_ohlcs,
+		       sell_price, sell_time, sell_ohlcs
+		FROM contracts
+		WHERE contract_id = $1
+	`
+
+	var contract trading.Contract
+	var buyOHLCsJSON []byte
+	var sellOHLCsJSON []byte
+
+	err := r.pool.QueryRow(ctx, query, contractID).Scan(
+		&contract.ContractID,
+		&contract.AccountID,
+		&contract.SeriesType,
+		&contract.Sentiment,
+		&contract.BuyPrice,
+		&contract.BuyTime,
+		&buyOHLCsJSON,
+		&contract.SellPrice,
+		&contract.SellTime,
+		&sellOHLCsJSON,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, common.ErrAccountNotFound // Contract not found
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contract: %w", err)
+	}
+
+	// Unmarshal buy OHLCs
+	if err := json.Unmarshal(buyOHLCsJSON, &contract.BuyOHLCs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal buy ohlcs: %w", err)
+	}
+
+	// Unmarshal sell OHLCs if present
+	if sellOHLCsJSON != nil {
+		if err := json.Unmarshal(sellOHLCsJSON, &contract.SellOHLCs); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal sell ohlcs: %w", err)
+		}
+	}
+
+	return &contract, nil
+}
+
 // ListContracts retrieves contracts with optional series filter
 func (r *TradingRepository) ListContracts(ctx context.Context, accountID string, seriesType *string) ([]trading.Contract, error) {
 	var query string

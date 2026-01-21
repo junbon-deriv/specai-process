@@ -36,6 +36,9 @@ type Repository interface {
 	// GetPriceSeries finds price series by ID
 	GetPriceSeries(ctx context.Context, seriesID uuid.UUID) (*PriceSeries, error)
 
+	// GetContract retrieves a single contract by ID
+	GetContract(ctx context.Context, contractID int64) (*Contract, error)
+
 	// ListContracts retrieves contracts with optional series filter
 	ListContracts(ctx context.Context, accountID string, seriesType *string) ([]Contract, error)
 
@@ -150,7 +153,7 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 	// Get last candle from buy OHLCs (last preview candle)
 	lastIdx := len(openResult.BuyOHLCs) - 1
 	lastCandle := openResult.BuyOHLCs[lastIdx]
-	
+
 	// Calculate start time from config interval
 	startTime := lastCandle.Timestamp.Add(time.Duration(config.IntervalSeconds) * time.Second)
 	sellCandles, err := s.seriesService.GenerateCandles(ctx, priceSeries.SeriesType, lastCandle.Close, config.ExecutionCandles, startTime)
@@ -191,8 +194,26 @@ func (s *Service) ExecuteTrade(ctx context.Context, req SwipeBuyRequest) (*Swipe
 	}, nil
 }
 
-// ListContracts retrieves trading history (SwipeList)
-func (s *Service) ListContracts(ctx context.Context, accountID string, seriesType *string) (*SwipeListResponse, error) {
+// ListContracts retrieves trading history or a single contract (SwipeContracts)
+func (s *Service) ListContracts(ctx context.Context, accountID string, contractID *int64, seriesType *string) (*SwipeListResponse, error) {
+	// If contract_id is provided, return single contract
+	if contractID != nil {
+		contract, err := s.repo.GetContract(ctx, *contractID)
+		if err != nil {
+			return nil, err
+		}
+
+		// Verify contract belongs to account
+		if contract.AccountID != accountID {
+			return nil, common.ErrAccountNotFound
+		}
+
+		return &SwipeListResponse{
+			Contracts: []Contract{*contract},
+		}, nil
+	}
+
+	// Otherwise, list contracts for account
 	// Validate account exists
 	if _, err := s.accountService.GetAccount(ctx, accountID); err != nil {
 		return nil, err

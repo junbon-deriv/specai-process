@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/deriv/arcade/internal/trading"
@@ -55,7 +56,7 @@ func (h *TradingHandler) SwipeBuy(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, response)
 }
 
-// SwipeList handles GET /swipe/list
+// SwipeList handles GET /swipe/contracts
 func (h *TradingHandler) SwipeList(w http.ResponseWriter, r *http.Request) {
 	accountID := r.URL.Query().Get("account_id")
 	if accountID == "" {
@@ -63,12 +64,24 @@ func (h *TradingHandler) SwipeList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional contract_id parameter for single contract lookup
+	var contractID *int64
+	if cidStr := r.URL.Query().Get("contract_id"); cidStr != "" {
+		var cid int64
+		if _, err := fmt.Sscanf(cidStr, "%d", &cid); err != nil {
+			WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid contract_id format")
+			return
+		}
+		contractID = &cid
+	}
+
+	// Optional series_type filter for list
 	var seriesType *string
 	if st := r.URL.Query().Get("series_type"); st != "" {
 		seriesType = &st
 	}
 
-	response, err := h.tradingService.ListContracts(r.Context(), accountID, seriesType)
+	response, err := h.tradingService.ListContracts(r.Context(), accountID, contractID, seriesType)
 	if err != nil {
 		HandleServiceError(w, err)
 		return
