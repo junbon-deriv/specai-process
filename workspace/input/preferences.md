@@ -1,0 +1,3 @@
+- Backend is a Golang service exposing REST api with JSON request/response.
+- postgreSQL as database.
+- Frontend to use react js.
